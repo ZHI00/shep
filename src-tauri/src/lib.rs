@@ -27,6 +27,7 @@ pub fn run() {
         .plugin(tauri_plugin_dialog::init())
         .plugin(tauri_plugin_notification::init())
         .plugin(tauri_plugin_process::init())
+        .plugin(tauri_plugin_clipboard_manager::init())
         .manage(PtyManager::new())
         .manage(WorkspaceManager::new())
         .manage(UsageDb::open().unwrap_or_else(|e| {

@@ -834,17 +834,111 @@ fn resolve_claude(
     )
 }
 
-fn claude_pid_session_id(home: &Path, repo_path: &str, process_id: Option<u32>) -> Option<String> {
-    let path = home
-        .join(".claude/sessions")
-        .join(format!("{}.json", process_id?));
+struct ClaudePidSession {
+    pid: u32,
+    started_at_ms: i64,
+    session_id: String,
+}
+
+fn read_claude_pid_session(path: &Path, repo_path: &str) -> Option<ClaudePidSession> {
     let row: Value = serde_json::from_str(&fs::read_to_string(path).ok()?).ok()?;
     if row.get("cwd").and_then(Value::as_str) != Some(repo_path) {
         return None;
     }
-    row.get("sessionId")
-        .and_then(Value::as_str)
-        .map(ToString::to_string)
+    Some(ClaudePidSession {
+        pid: row.get("pid").and_then(Value::as_u64)? as u32,
+        started_at_ms: row.get("startedAt").and_then(Value::as_i64).unwrap_or(0),
+        session_id: row.get("sessionId").and_then(Value::as_str)?.to_string(),
+    })
+}
+
+/// The session id claimed by the agent running in this tab, which is what makes
+/// the title exact instead of a guess from timestamps.
+///
+/// The PTY's direct child is the login shell — Shep starts `zsh -l` and the
+/// agent runs inside it — while Claude files its record under its own pid. So
+/// `{pid}.json` normally does not exist, and matching has to walk up from each
+/// recorded pid to see whether it belongs to this tab's process tree. Without
+/// that walk the resolver always fell back to picking the session file whose
+/// timestamps looked closest, and a second Claude running in the same project
+/// could win: the tab then showed someone else's opening prompt.
+fn claude_pid_session_id(home: &Path, repo_path: &str, process_id: Option<u32>) -> Option<String> {
+    let process_id = process_id?;
+    let sessions = home.join(".claude/sessions");
+
+    // Fast path: the agent is the PTY's direct child (no shell in between).
+    if let Some(record) =
+        read_claude_pid_session(&sessions.join(format!("{process_id}.json")), repo_path)
+    {
+        if record.pid == process_id {
+            return Some(record.session_id);
+        }
+    }
+
+    // Otherwise scan for the record whose process descends from this PTY. Ties
+    // go to the most recently started, which is the live one after a restart
+    // left a stale file behind under a since-recycled pid.
+    let mut best: Option<ClaudePidSession> = None;
+    for entry in fs::read_dir(&sessions).ok()?.flatten() {
+        let path = entry.path();
+        if path.extension().and_then(|value| value.to_str()) != Some("json") {
+            continue;
+        }
+        let Some(record) = read_claude_pid_session(&path, repo_path) else {
+            continue;
+        };
+        if !is_descendant_of(record.pid, process_id) {
+            continue;
+        }
+        if best
+            .as_ref()
+            .is_none_or(|current| record.started_at_ms > current.started_at_ms)
+        {
+            best = Some(record);
+        }
+    }
+    best.map(|record| record.session_id)
+}
+
+fn is_descendant_of(pid: u32, ancestor: u32) -> bool {
+    let mut current = pid;
+    // Depth cap: a process table read mid-change must not spin forever.
+    for _ in 0..16 {
+        if current == ancestor {
+            return true;
+        }
+        match parent_pid(current) {
+            Some(parent) if parent != 0 && parent != current => current = parent,
+            _ => return false,
+        }
+    }
+    false
+}
+
+#[cfg(target_os = "macos")]
+fn parent_pid(pid: u32) -> Option<u32> {
+    let mut info: libc::proc_bsdinfo = unsafe { std::mem::zeroed() };
+    let size = std::mem::size_of::<libc::proc_bsdinfo>() as i32;
+    let written = unsafe {
+        libc::proc_pidinfo(
+            pid as i32,
+            libc::PROC_PIDTBSDINFO,
+            0,
+            std::ptr::addr_of_mut!(info).cast(),
+            size,
+        )
+    };
+    // An exited pid returns 0 bytes rather than an error code, so the write
+    // length is what says the record is real.
+    if written != size {
+        return None;
+    }
+    Some(info.pbi_ppid)
+}
+
+#[cfg(not(target_os = "macos"))]
+fn parent_pid(_pid: u32) -> Option<u32> {
+    None
 }
 
 #[derive(Clone, Copy)]
@@ -897,7 +991,16 @@ fn resolve_jsonl_session_directory(
     if let Some((_, session_id, title)) = candidates.into_iter().next() {
         return Some(SessionTitleMatch { session_id, title });
     }
-    continued.sort_by_key(|candidate| std::cmp::Reverse(candidate.0));
+    // Recent writes are the only evidence a continued session leaves, and it is
+    // ambiguous evidence: while a tab waits for its own first prompt, a second
+    // agent working in the same project also looks "recently written". Claiming
+    // the busiest file there hands the tab someone else's title — and the
+    // caller stops polling once a title arrives, so the mistake is permanent.
+    // A lone candidate has no such rival; anything more waits for the real
+    // first prompt to land.
+    if continued.len() != 1 {
+        return None;
+    }
     continued
         .into_iter()
         .next()
@@ -988,6 +1091,14 @@ fn read_jsonl_session(
                         .and_then(|message| message.get("content"))
                         .and_then(message_content_text)
                         .and_then(|text| compact_prompt_title(&text));
+                }
+                // Claude has no equivalent of Pi's `session_info`, so the start
+                // time and the opening prompt are everything this reads. Long
+                // conversations run to megabytes and the resolver rescans the
+                // whole project directory every second until it finds a match —
+                // parsing past the first prompt is work with no answer in it.
+                if first_prompt.is_some() {
+                    break;
                 }
             }
         }
@@ -1132,6 +1243,97 @@ mod tests {
         let found = resolve_session_title_from_home(&home, "claude", repo, started, None, None)
             .expect("a continued session must still be identified");
         assert_eq!(found.session_id, "old-session");
+
+        fs::remove_dir_all(home).unwrap();
+    }
+
+    /// Shep launches the agent inside `zsh -l`, so the pid Claude records is
+    /// the PTY child's grandchild, not the PTY child itself.
+    #[test]
+    fn claude_matches_the_session_of_an_agent_below_the_login_shell() {
+        let home = temp_home();
+        let repo = "/repo";
+        let sessions = home.join(".claude/sessions");
+        fs::create_dir_all(&sessions).unwrap();
+        let dir = home.join(".claude/projects/-repo");
+        fs::create_dir_all(&dir).unwrap();
+
+        // This test process stands in for the agent: it is a descendant of
+        // itself, which is what the walk has to accept.
+        let agent_pid = std::process::id();
+        fs::write(
+            sessions.join(format!("{agent_pid}.json")),
+            format!(
+                "{{\"pid\":{agent_pid},\"sessionId\":\"mine\",\"cwd\":\"/repo\",\"startedAt\":1}}"
+            ),
+        )
+        .unwrap();
+        // A second agent in the same project, recorded under a pid that is not
+        // running. It must never be claimed.
+        fs::write(
+            sessions.join("999999.json"),
+            "{\"pid\":999999,\"sessionId\":\"theirs\",\"cwd\":\"/repo\",\"startedAt\":2}",
+        )
+        .unwrap();
+
+        for (id, prompt) in [("mine", "My own prompt"), ("theirs", "Another tab's prompt")] {
+            fs::write(
+                dir.join(format!("{id}.jsonl")),
+                format!(
+                    concat!(
+                        "{{\"type\":\"mode\",\"sessionId\":\"{id}\"}}\n",
+                        "{{\"type\":\"user\",\"cwd\":\"/repo\",\"timestamp\":\"2026-08-01T09:00:00Z\",",
+                        "\"message\":{{\"role\":\"user\",\"content\":\"{prompt}\"}}}}\n"
+                    ),
+                    id = id,
+                    prompt = prompt,
+                ),
+            )
+            .unwrap();
+        }
+
+        // Both transcripts predate the launch, so without the pid match the
+        // resolver would be guessing between them.
+        let started = parse_timestamp_ms("2026-08-07T12:00:00Z").unwrap();
+        // The PTY's own child is the shell; pass the agent pid's parent chain
+        // through the real process table by using this process as the anchor.
+        let found =
+            resolve_session_title_from_home(&home, "claude", repo, started, None, Some(agent_pid))
+                .expect("the agent's own session must be identified by pid");
+        assert_eq!(found.session_id, "mine");
+        assert_eq!(found.title.as_deref(), Some("My own prompt"));
+
+        fs::remove_dir_all(home).unwrap();
+    }
+
+    /// Two agents writing in one project make "most recently written" a coin
+    /// flip, and the caller stops polling as soon as a title arrives.
+    #[test]
+    fn ambiguous_continued_sessions_are_left_unresolved() {
+        let home = temp_home();
+        let repo = "/repo";
+        let dir = home.join(".claude/projects/-repo");
+        fs::create_dir_all(&dir).unwrap();
+        for id in ["old-session", "other-session"] {
+            fs::write(
+                dir.join(format!("{id}.jsonl")),
+                format!(
+                    concat!(
+                        "{{\"type\":\"mode\",\"sessionId\":\"{id}\"}}\n",
+                        "{{\"type\":\"user\",\"cwd\":\"/repo\",\"timestamp\":\"2026-08-01T09:00:00Z\",",
+                        "\"message\":{{\"role\":\"user\",\"content\":\"Started this days ago\"}}}}\n"
+                    ),
+                    id = id,
+                ),
+            )
+            .unwrap();
+        }
+        let started = parse_timestamp_ms("2026-08-07T12:00:00Z").unwrap();
+
+        assert!(
+            resolve_session_title_from_home(&home, "claude", repo, started, None, None).is_none(),
+            "a tab must wait for its own prompt rather than adopt a rival's title",
+        );
 
         fs::remove_dir_all(home).unwrap();
     }

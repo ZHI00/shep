@@ -72,6 +72,12 @@ const en = {
   "tab.newAgent": "New Agent",
   "tab.todos": "To-dos",
 
+  // ── Terminal context menu ────────────────────────────────
+  "terminal.copy": "Copy",
+  "terminal.paste": "Paste",
+  "terminal.selectAll": "Select All",
+  "terminal.clear": "Clear",
+
   // ── Common ───────────────────────────────────────────────
   "common.cancel": "Cancel",
   "common.close": "Close",
@@ -172,6 +178,12 @@ const zh: Record<TranslationKey, string> = {
   "tab.files": "文件",
   "tab.newAgent": "新建 Agent",
   "tab.todos": "待办",
+
+  // ── 终端右键菜单 ─────────────────────────────────────────
+  "terminal.copy": "复制",
+  "terminal.paste": "粘贴",
+  "terminal.selectAll": "全选",
+  "terminal.clear": "清屏",
 
   // ── 通用 ─────────────────────────────────────────────────
   "common.cancel": "取消",

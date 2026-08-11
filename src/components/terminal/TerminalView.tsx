@@ -1,4 +1,7 @@
-import { useEffect, useRef, useCallback } from "react";
+import { useEffect, useRef, useState, useCallback } from "react";
+import { createPortal } from "react-dom";
+import { Copy, ClipboardPaste, TextSelect, Eraser } from "lucide-react";
+import { readText, writeText } from "@tauri-apps/plugin-clipboard-manager";
 import { Terminal } from "@xterm/xterm";
 import { FitAddon } from "@xterm/addon-fit";
 import { Unicode11Addon } from "@xterm/addon-unicode11";
@@ -27,6 +30,11 @@ import { useTerminalSettingsStore } from "../../stores/useTerminalSettingsStore"
 import { useTerminalStore } from "../../stores/useTerminalStore";
 import { terminalCache } from "./terminalCache";
 import { reconcileTerminalRenderer } from "./terminalRenderer";
+import ContextMenu from "../shared/ContextMenu";
+import type { ContextMenuItem } from "../shared/ContextMenu";
+import { useT } from "../../stores/useLanguageStore";
+import { useNoticeStore } from "../../stores/useNoticeStore";
+import { getErrorMessage } from "../../lib/errors";
 
 interface TerminalViewProps {
   ptyId: number;
@@ -37,7 +45,11 @@ export default function TerminalView({
   ptyId,
   visible,
 }: TerminalViewProps) {
+  const t = useT();
+  const pushNotice = useNoticeStore((s) => s.pushNotice);
   const containerRef = useRef<HTMLDivElement>(null);
+  /** Right-click menu anchor, plus the selection captured when it opened. */
+  const [menu, setMenu] = useState<{ x: number; y: number; selection: string } | null>(null);
   const mountedRef = useRef(false);
   const attachedRef = useRef(false);
   const pinnedToBottomRef = useRef(true);
@@ -135,6 +147,75 @@ export default function TerminalView({
     terminalCache.set(ptyId, entry);
     return entry;
   }, [ptyId]);
+
+  // The WebView's own context menu is suppressed app-wide (see main.tsx), so
+  // the terminal supplies its own copy/paste menu instead of losing right-click
+  // entirely. The selection is captured on open because clicking a menu item
+  // moves focus away from xterm.
+  const handleContextMenu = useCallback((event: React.MouseEvent) => {
+    const cached = terminalCache.get(ptyId);
+    if (!cached) return;
+    setMenu({
+      x: event.clientX,
+      y: event.clientY,
+      selection: cached.term.getSelection(),
+    });
+  }, [ptyId]);
+
+  const closeMenu = useCallback(() => {
+    setMenu(null);
+    terminalCache.get(ptyId)?.term.focus();
+  }, [ptyId]);
+
+  // Clipboard goes through the Tauri plugin rather than navigator.clipboard:
+  // WKWebView gates reads behind a native paste prompt.
+  const menuItems: ContextMenuItem[] = [
+    ...(menu?.selection
+      ? [{
+          label: t("terminal.copy"),
+          icon: <Copy size={14} />,
+          onClick: () => {
+            writeText(menu.selection).catch((error) => {
+              pushNotice({
+                tone: "error",
+                title: "Couldn't copy selection",
+                message: getErrorMessage(error),
+              });
+            });
+          },
+        }]
+      : []),
+    {
+      label: t("terminal.paste"),
+      icon: <ClipboardPaste size={14} />,
+      onClick: () => {
+        readText()
+          .then((text) => {
+            // paste() honours bracketed-paste mode, so multi-line text lands
+            // intact in agent TUIs instead of being run line by line.
+            if (text) terminalCache.get(ptyId)?.term.paste(text);
+          })
+          .catch((error) => {
+            pushNotice({
+              tone: "error",
+              title: "Couldn't paste from clipboard",
+              message: getErrorMessage(error),
+            });
+          });
+      },
+    },
+    { separator: true, label: "_sep_view" },
+    {
+      label: t("terminal.selectAll"),
+      icon: <TextSelect size={14} />,
+      onClick: () => terminalCache.get(ptyId)?.term.selectAll(),
+    },
+    {
+      label: t("terminal.clear"),
+      icon: <Eraser size={14} />,
+      onClick: () => terminalCache.get(ptyId)?.term.clear(),
+    },
+  ];
 
   const applyTerminalSize = useCallback(async (cols: number, rows: number) => {
     const cached = terminalCache.get(ptyId);
@@ -333,7 +414,12 @@ export default function TerminalView({
 
       if (!attachedRef.current) {
         registerTerminal(ptyId, term, () => {
-          if (pinnedToBottomRef.current) term.scrollToBottom();
+          // Dragging out a selection emits no wheel events, so follow mode is
+          // still on and the next chunk of output would yank the selection out
+          // from under the pointer. Follow mode itself is left untouched:
+          // clearing the selection — a click, a keystroke — resumes it on the
+          // very next write.
+          if (pinnedToBottomRef.current && !term.hasSelection()) term.scrollToBottom();
         });
         flushPendingOutput(ptyId);
         attachedRef.current = true;
@@ -422,7 +508,20 @@ export default function TerminalView({
       }}
     >
       <div className="terminal-underlay" />
-      <div ref={containerRef} className="terminal-surface" />
+      <div
+        ref={containerRef}
+        className="terminal-surface"
+        onContextMenu={handleContextMenu}
+      />
+      {menu && createPortal(
+        <ContextMenu
+          x={menu.x}
+          y={menu.y}
+          items={menuItems}
+          onClose={closeMenu}
+        />,
+        document.body,
+      )}
     </div>
   );
 }

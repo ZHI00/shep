@@ -36,5 +36,6 @@ notify = { version = "8", features = ["macos_fsevent"] }
 core-text = "22"
 core-foundation = "0.10"
 tauri-plugin-process = "2"
+tauri-plugin-clipboard-manager = "2"
 url = "2"
 unicode-segmentation = "1.13.3"
