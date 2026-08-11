@@ -471,6 +471,73 @@ select {
   margin-bottom: 16px;
 }
 
+.settings-section__hint {
+  margin: -8px 0 14px;
+  font-size: 12px;
+  line-height: 1.5;
+  color: var(--text-muted);
+  opacity: 0.8;
+}
+
+/* ── Assistant launch command overrides ────────────────── */
+
+.assistant-command-row + .assistant-command-row {
+  margin-top: 10px;
+  padding-top: 10px;
+  border-top: 1px solid color-mix(in srgb, var(--overlay) 6%, transparent);
+}
+
+.assistant-command-row__head {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  margin-bottom: 5px;
+}
+
+.assistant-command-row__name {
+  font-size: 13px;
+  color: var(--text-secondary);
+}
+
+.assistant-command-row__reset {
+  margin-left: auto;
+  padding: 1px 7px;
+  border: none;
+  border-radius: var(--radius-sm);
+  background: transparent;
+  font-size: 11px;
+  color: var(--text-muted);
+  cursor: pointer;
+  transition: color 120ms ease, background 120ms ease;
+}
+.assistant-command-row__reset:hover {
+  color: var(--text-primary);
+  background: color-mix(in srgb, var(--overlay) 10%, transparent);
+}
+
+/* One field holds the whole command line, so it gets the full width. */
+.assistant-command-row__input {
+  display: block;
+  width: 100%;
+  min-width: 0;
+  padding: 6px 10px;
+  border-radius: var(--radius-sm);
+  background: color-mix(in srgb, var(--overlay) 6%, transparent);
+  border: 1px solid var(--border-hover);
+  color: var(--text-primary);
+  font-size: 12px;
+  font-family: ui-monospace, SFMono-Regular, Menlo, monospace;
+  outline: none;
+  transition: border-color 160ms ease;
+}
+.assistant-command-row__input:focus {
+  border-color: var(--border-active);
+}
+.assistant-command-row__input::placeholder {
+  color: var(--text-muted);
+  opacity: 0.5;
+}
+
 .settings-divider {
   border: none;
   border-top: 1px solid var(--glass-border);
@@ -1014,13 +1081,20 @@ select {
 /* Top-level section headers are typographic labels, distinct from the
    icon-led item rows nested beneath them. */
 .sidebar-section-toggle {
-  min-height: 24px;
-  padding: 3px 8px;
-  font-size: 10.5px;
+  min-height: 32px;
+  padding: 5px 8px;
+  font-size: 11.5px;
   font-weight: 600;
   text-transform: uppercase;
   letter-spacing: 0.08em;
   color: var(--text-muted);
+}
+/* Bigger than the shared .badge — this one is a click target's neighbour and
+   sits in a header row, so it needs to hold its own visually. */
+.sidebar-section-toggle .badge {
+  font-size: 10.5px;
+  padding: 0 7px;
+  line-height: 18px;
 }
 
 .sidebar-section-toggle__label {
@@ -1032,6 +1106,10 @@ select {
 .sidebar-section-toggle__chevron {
   display: inline-flex;
   align-items: center;
+  justify-content: center;
+  /* Padded out to a comfortable target — the glyph itself stays small. */
+  width: 20px;
+  height: 20px;
   opacity: 0.45;
   transition: opacity 120ms ease;
 }
@@ -1046,140 +1124,258 @@ select {
   gap: 2px;
 }
 
-.agent-session-row {
+/* Section title and its add button share a row. */
+.sidebar-section__header {
+  display: flex;
   align-items: center;
-  gap: 7px;
-  min-height: 38px;
-  padding-top: 4px;
-  padding-bottom: 4px;
+  gap: 2px;
+}
+.sidebar-section__header > .sidebar-section-toggle {
+  flex: 1;
+  min-width: 0;
 }
 
-.agent-session-row__text {
-  min-width: 0;
+.sidebar-section__add {
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  width: 28px;
+  height: 28px;
+  flex-shrink: 0;
+  padding: 0;
+  border: none;
+  border-radius: var(--radius-sm);
+  background: transparent;
+  color: var(--text-muted);
+  cursor: pointer;
+  opacity: 0.6;
+  transition: opacity 120ms ease, background 120ms ease, color 120ms ease;
+}
+.sidebar-section__add:hover {
+  opacity: 1;
+  color: var(--text-primary);
+  background: color-mix(in srgb, var(--overlay) 14%, transparent);
+}
+
+/* ── Project rows ──────────────────────────────────────── */
+
+/* Roomier than a bare .list-item: this is the sidebar's primary hit target. */
+.project-row {
+  gap: 6px;
+  min-height: 34px;
+  padding: 5px 8px 5px 2px;
+  font-weight: 500;
+}
+.project-row:hover {
+  background: color-mix(in srgb, var(--overlay) 5%, transparent);
+}
+.project-row.project-active {
+  background: color-mix(in srgb, var(--overlay) 9%, transparent);
+}
+
+/* Chevron is its own button so expanding never changes the selection. */
+.project-row__chevron {
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  width: 18px;
+  height: 22px;
+  flex-shrink: 0;
+  padding: 0;
+  border: none;
+  background: transparent;
+  border-radius: var(--radius-sm);
+  color: var(--text-muted);
+  cursor: pointer;
+  opacity: 0.55;
+  transition: opacity 120ms ease, background 120ms ease;
+}
+.project-row__chevron:hover {
+  opacity: 1;
+  background: color-mix(in srgb, var(--overlay) 12%, transparent);
+}
+
+/* Takes the slack so the add button always sits hard right. */
+.project-row__name {
   flex: 1;
+  min-width: 0;
+}
+
+/* Add button stays reserved-but-faint until hover, so rows don't jump. */
+.project-row__add {
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  width: 22px;
+  height: 22px;
+  flex-shrink: 0;
+  padding: 0;
+  border: none;
+  border-radius: var(--radius-sm);
+  background: transparent;
+  color: var(--text-muted);
+  cursor: pointer;
+  opacity: 0;
+  transition: opacity 120ms ease, background 120ms ease, color 120ms ease;
+}
+.project-row:hover .project-row__add,
+.project-row__add[aria-expanded="true"],
+.project-row__add:focus-visible {
+  opacity: 0.75;
+}
+.project-row__add:hover,
+.project-row__add[aria-expanded="true"] {
+  opacity: 1;
+  color: var(--text-primary);
+  background: color-mix(in srgb, var(--overlay) 14%, transparent);
+}
+
+/* ── Session rows nested under a project ───────────────── */
+
+.project-node__body {
   display: flex;
   flex-direction: column;
-  gap: 1px;
-  line-height: 1.2;
+  gap: 2px;
+  margin: 2px 0 6px;
+  padding-left: 10px;
+  margin-left: 9px;
+  border-left: 1px solid color-mix(in srgb, var(--overlay) 10%, transparent);
 }
 
-.agent-session-row__location {
-  overflow: hidden;
-  color: var(--text-muted);
-  font-size: 11px;
-  text-align: left;
-  text-overflow: ellipsis;
-  white-space: nowrap;
-}
-
-.agent-session-row__title {
-  overflow: hidden;
-  color: var(--text-secondary);
+.project-session-row {
+  display: flex;
+  align-items: center;
+  gap: 7px;
+  width: 100%;
+  min-height: 28px;
+  padding: 3px 8px;
+  border-radius: var(--radius-sm);
   font-size: var(--text-body);
-  text-overflow: ellipsis;
-  white-space: nowrap;
+  color: var(--text-secondary);
+  cursor: pointer;
+  transition: background 140ms ease, color 140ms ease;
+}
+.project-session-row:hover {
+  color: var(--text-primary);
+  background: color-mix(in srgb, var(--overlay) 6%, transparent);
+}
+.project-session-row:focus-visible {
+  outline: 2px solid rgba(122, 162, 247, 0.75);
+  outline-offset: -2px;
+}
+.project-session-row--active {
+  color: var(--text-primary);
+  background: color-mix(in srgb, var(--overlay) 10%, transparent);
 }
 
-.session-title-output {
-  text-transform: lowercase;
-}
-
-.agent-session-list {
-  max-height: clamp(152px, 35vh, 304px);
-  overflow-y: auto;
-  overscroll-behavior: contain;
-  padding-right: 3px;
-  scrollbar-color: color-mix(in srgb, var(--overlay) 24%, transparent) transparent;
-  scrollbar-width: thin;
-}
-
-.agent-session-row__indicator {
-  margin-left: auto;
-}
-
-.activity-indicator {
-  position: relative;
-  width: 7px;
-  height: 7px;
+.project-session-row__logo {
   flex-shrink: 0;
-  margin-left: auto;
+  opacity: 0.85;
+}
+
+/* Carried over from the last run — nothing is running behind it yet. */
+.project-session-row--dormant {
+  color: var(--text-muted);
+}
+.project-session-row--dormant .project-session-row__logo {
+  opacity: 0.4;
+  filter: grayscale(1);
+}
+.project-session-row--dormant:hover .project-session-row__logo {
+  opacity: 0.8;
+  filter: none;
+}
+
+.project-session-row__resume-hint {
+  flex-shrink: 0;
+  opacity: 0;
+  transition: opacity 120ms ease;
+}
+.project-session-row--dormant:hover .project-session-row__resume-hint,
+.project-session-row--dormant:focus-visible .project-session-row__resume-hint {
+  opacity: 0.7;
+}
+
+.project-session-row__label {
+  flex: 1;
+  min-width: 0;
+}
+
+/* ── Session state dot ─────────────────────────────────── */
+/* Four mutually exclusive states, picked in ProjectSessionRow. Each active
+   state gets its own motion so they're tellable apart without reading colour:
+   running breathes, done pings once-per-cycle, waiting blinks. */
+
+.session-dot {
+  position: relative;
+  flex-shrink: 0;
+  width: 6px;
+  height: 6px;
   border-radius: 50%;
-  background: color-mix(in srgb, var(--overlay) 25%, transparent);
+  background: var(--text-muted);
+  opacity: 0.35;
 }
 
-.activity-indicator--idle {
-  background: color-mix(in srgb, var(--overlay) 22%, transparent);
-}
-
-.activity-indicator--running {
-  background: color-mix(in srgb, var(--status-running) 62%, transparent);
-  box-shadow: 0 0 0 1px color-mix(in srgb, var(--status-running) 16%, transparent);
-}
-
-.activity-indicator--working {
-  background: var(--status-added);
-  box-shadow: 0 0 8px color-mix(in srgb, var(--status-added) 38%, transparent);
-}
-
-.activity-indicator--active {
-  background: var(--status-running);
-  box-shadow: 0 0 6px color-mix(in srgb, var(--status-running) 28%, transparent);
-  animation: activity-indicator-pulse 1.25s ease-in-out infinite;
-}
-
-.activity-indicator--active::after {
+/* The expanding halo shared by running/done — drawn outside the 6px dot so it
+   never shifts layout. */
+.session-dot--running::after,
+.session-dot--done::after {
   content: "";
   position: absolute;
-  inset: -4px;
-  border: 1px solid color-mix(in srgb, var(--status-running) 48%, transparent);
+  inset: -3px;
   border-radius: 50%;
-  animation: activity-indicator-ring 1.25s ease-out infinite;
+  border: 1px solid currentColor;
+  color: inherit;
+  opacity: 0;
 }
 
-.activity-indicator--done {
+.session-dot--running {
   background: var(--status-running);
-  box-shadow: 0 0 0 3px color-mix(in srgb, var(--status-running) 14%, transparent);
+  color: var(--status-running);
+  opacity: 1;
+  animation: session-dot-breathe 1.8s ease-in-out infinite;
+}
+.session-dot--running::after {
+  animation: session-dot-ping 1.8s ease-out infinite;
 }
 
-.activity-indicator--attention,
-.activity-indicator--stuck {
+.session-dot--done {
+  background: var(--status-clean);
+  color: var(--status-clean);
+  opacity: 1;
+}
+/* Slower, single ping: finished work should catch the eye without nagging. */
+.session-dot--done::after {
+  animation: session-dot-ping 2.8s ease-out infinite;
+}
+
+.session-dot--waiting {
   background: var(--status-attention);
-  box-shadow: 0 0 0 3px color-mix(in srgb, var(--status-attention) 18%, transparent);
+  opacity: 1;
+  animation: session-dot-blink 1s steps(1, end) infinite;
 }
 
-.activity-indicator--failed {
-  background: var(--status-crashed);
-  box-shadow: 0 0 0 3px color-mix(in srgb, var(--status-crashed) 16%, transparent);
+@keyframes session-dot-breathe {
+  0%, 100% { opacity: 1; }
+  50% { opacity: 0.45; }
 }
 
-@keyframes activity-indicator-pulse {
-  0%,
-  100% {
-    opacity: 0.72;
-    transform: scale(0.9);
-  }
-
-  50% {
-    opacity: 1;
-    transform: scale(1.08);
-  }
+@keyframes session-dot-ping {
+  0% { transform: scale(0.7); opacity: 0.7; }
+  70% { transform: scale(1.6); opacity: 0; }
+  100% { transform: scale(1.6); opacity: 0; }
 }
 
-@keyframes activity-indicator-ring {
-  0% {
-    opacity: 0.8;
-    transform: scale(0.7);
-  }
-
-  100% {
-    opacity: 0;
-    transform: scale(1.35);
-  }
+@keyframes session-dot-blink {
+  0%, 49% { opacity: 1; }
+  50%, 100% { opacity: 0.25; }
 }
 
 @media (prefers-reduced-motion: reduce) {
-  .activity-indicator--active,
-  .activity-indicator--active::after {
+  .session-dot--running,
+  .session-dot--waiting,
+  .session-dot--running::after,
+  .session-dot--done::after {
     animation: none;
   }
 }
@@ -1725,11 +1921,31 @@ select {
   display: flex;
   align-items: center;
   gap: 5px;
+  min-width: 0;
+  /* Keep clear of the traffic lights on the left and the toggle on the right. */
+  max-width: min(52%, 560px);
+  padding: 0 12px;
   font-size: 12px;
   font-weight: 500;
   color: var(--text-muted);
+  /* Clicks fall through to the drag region so the window still moves. */
   pointer-events: none;
   user-select: none;
+}
+.drag-region__title-project {
+  min-width: 0;
+  flex-shrink: 1;
+}
+.drag-region__title-sep {
+  flex-shrink: 0;
+  opacity: 0.35;
+}
+/* The session is the more specific answer to "where am I", so it stays
+   readable while the project name gives up room first. */
+.drag-region__title-session {
+  min-width: 0;
+  flex-shrink: 2;
+  color: var(--text-secondary);
 }
 
 /* ── Sidebar usage section ─────────────────────────────── */
@@ -2585,6 +2801,73 @@ select {
   overscroll-behavior: none;
 }
 
+/* ── Scrollbars ────────────────────────────────────────── */
+/* The `scrollbar-color` declarations dotted around this file can only set
+   colours. WebKit pseudo-elements do the rest, so every scrolling surface in
+   the app gets the same shape. Width stays at 12px because xterm measures the
+   scrollbar when computing its column count; the thumb is slimmed with a
+   transparent border instead, changing how it looks without changing what it
+   occupies. */
+.terminal-surface .xterm-viewport::-webkit-scrollbar,
+.repo-browser__tree::-webkit-scrollbar,
+.git-panel__file-list::-webkit-scrollbar,
+.git-panel__diff::-webkit-scrollbar,
+.commands-panel__simple-list::-webkit-scrollbar,
+.usage-heatmap__scroll::-webkit-scrollbar {
+  width: 12px;
+  height: 12px;
+}
+
+.terminal-surface .xterm-viewport::-webkit-scrollbar-track,
+.repo-browser__tree::-webkit-scrollbar-track,
+.git-panel__file-list::-webkit-scrollbar-track,
+.git-panel__diff::-webkit-scrollbar-track,
+.commands-panel__simple-list::-webkit-scrollbar-track,
+.usage-heatmap__scroll::-webkit-scrollbar-track {
+  background: transparent;
+}
+
+.terminal-surface .xterm-viewport::-webkit-scrollbar-thumb,
+.repo-browser__tree::-webkit-scrollbar-thumb,
+.git-panel__file-list::-webkit-scrollbar-thumb,
+.git-panel__diff::-webkit-scrollbar-thumb,
+.commands-panel__simple-list::-webkit-scrollbar-thumb,
+.usage-heatmap__scroll::-webkit-scrollbar-thumb {
+  background-color: color-mix(in srgb, var(--overlay) 16%, transparent);
+  border: 3px solid transparent;
+  border-radius: 999px;
+  /* Keeps the border see-through instead of painting the thumb beneath it. */
+  background-clip: padding-box;
+  transition: background-color 140ms ease;
+}
+
+.terminal-surface .xterm-viewport::-webkit-scrollbar-thumb:hover,
+.repo-browser__tree::-webkit-scrollbar-thumb:hover,
+.git-panel__file-list::-webkit-scrollbar-thumb:hover,
+.git-panel__diff::-webkit-scrollbar-thumb:hover,
+.commands-panel__simple-list::-webkit-scrollbar-thumb:hover,
+.usage-heatmap__scroll::-webkit-scrollbar-thumb:hover {
+  background-color: color-mix(in srgb, var(--overlay) 34%, transparent);
+  background-clip: padding-box;
+}
+
+.terminal-surface .xterm-viewport::-webkit-scrollbar-thumb:active,
+.repo-browser__tree::-webkit-scrollbar-thumb:active,
+.git-panel__file-list::-webkit-scrollbar-thumb:active,
+.git-panel__diff::-webkit-scrollbar-thumb:active,
+.commands-panel__simple-list::-webkit-scrollbar-thumb:active,
+.usage-heatmap__scroll::-webkit-scrollbar-thumb:active {
+  background-color: color-mix(in srgb, var(--overlay) 46%, transparent);
+  background-clip: padding-box;
+}
+
+/* The square where a vertical and horizontal bar would meet. */
+.terminal-surface .xterm-viewport::-webkit-scrollbar-corner,
+.git-panel__diff::-webkit-scrollbar-corner,
+.usage-heatmap__scroll::-webkit-scrollbar-corner {
+  background: transparent;
+}
+
 .tab-bar {
   position: relative;
   display: flex;
@@ -2602,6 +2885,7 @@ select {
   height: 1px;
   background: color-mix(in srgb, var(--overlay) 8%, transparent);
 }
+/* Branch only — project and session are in the titlebar. */
 .tab-bar__breadcrumb {
   display: flex;
   align-items: center;
@@ -2609,12 +2893,11 @@ select {
   font-size: var(--text-body);
   color: var(--text-muted);
   white-space: nowrap;
-  flex-shrink: 0;
+  flex-shrink: 1;
+  min-width: 0;
+  max-width: 30%;
   margin-left: auto;
   padding: 0 8px;
-}
-.tab-bar__breadcrumb-on {
-  opacity: 0.4;
 }
 .tab-bar__breadcrumb-icon {
   opacity: 0.8;
@@ -3479,272 +3762,6 @@ select {
 .branch-dropdown__input::placeholder {
   color: var(--text-muted);
   opacity: 0.5;
-}
-
-/* ── Diff Strip (right rail — compact change-bar strip) ─── */
-
-.diff-strip {
-  position: relative;
-  display: flex;
-  flex-direction: column;
-  width: 56px;
-  flex-shrink: 0;
-  min-height: 0;
-  border-left: 1px solid var(--glass-border);
-  overflow: hidden;
-}
-
-.diff-strip__header {
-  position: relative;
-  display: flex;
-  align-items: flex-end;
-  justify-content: center;
-  height: 38px;
-  padding-bottom: 10px;
-  flex-shrink: 0;
-  overflow: hidden;
-}
-
-.diff-strip__header::after {
-  content: "";
-  position: absolute;
-  bottom: 0;
-  left: 10px;
-  right: 10px;
-  height: 1px;
-  background: color-mix(in srgb, var(--overlay) 8%, transparent);
-}
-
-.diff-strip__header-icon {
-  color: var(--text-muted);
-  flex-shrink: 0;
-}
-
-.diff-strip__footer {
-  position: relative;
-  display: flex;
-  flex-direction: column;
-  align-items: center;
-  gap: 2px;
-  padding: 9px 0 10px;
-  flex-shrink: 0;
-}
-
-.diff-strip__footer::before {
-  content: "";
-  position: absolute;
-  top: 0;
-  left: 10px;
-  right: 10px;
-  height: 1px;
-  background: color-mix(in srgb, var(--overlay) 8%, transparent);
-}
-
-.diff-strip__footer-stat {
-  font-size: 10px;
-  font-family: monospace;
-  font-weight: 600;
-  line-height: 1.3;
-  color: var(--text-muted);
-}
-
-.diff-strip__list {
-  flex: 1;
-  overflow-y: auto;
-  padding: 14px 0 6px;
-  scrollbar-width: none;
-}
-
-.diff-strip__list::-webkit-scrollbar { display: none; }
-
-.diff-strip__sprite {
-  position: absolute;
-  width: 0;
-  height: 0;
-  overflow: hidden;
-}
-
-.diff-strip__clean {
-  display: flex;
-  align-items: center;
-  justify-content: center;
-  height: 28px;
-  color: var(--text-muted);
-  opacity: 0.35;
-  font-size: 18px;
-  line-height: 1;
-}
-
-.diff-strip__row {
-  display: flex;
-  align-items: center;
-  justify-content: center;
-  gap: 4px;
-  width: 100%;
-  height: 34px;
-  padding: 0 10px;
-  background: transparent;
-  border: none;
-  cursor: pointer;
-  transition: background 100ms ease;
-}
-
-.diff-strip__row:hover {
-  background: var(--surface-hover);
-}
-
-.diff-strip__row--active {
-  background: var(--surface-active);
-}
-
-.diff-strip__row--active:hover {
-  background: var(--surface-active);
-}
-
-.diff-strip__icon-wrap {
-  position: relative;
-  display: flex;
-  align-items: center;
-  justify-content: center;
-  width: 30px;
-  height: 26px;
-}
-
-.diff-strip__file-icon {
-  color: color-mix(in srgb, var(--text-muted) 84%, transparent);
-  flex-shrink: 0;
-}
-
-.diff-strip__file-icon:not([data-icon-token]) {
-  opacity: 0.74;
-}
-
-.diff-strip__row:hover .diff-strip__file-icon:not([data-icon-token]),
-.diff-strip__row--active .diff-strip__file-icon:not([data-icon-token]) {
-  opacity: 1;
-}
-
-.diff-strip__change-meter {
-  position: absolute;
-  left: 3px;
-  right: 3px;
-  bottom: 1px;
-  display: flex;
-  align-items: center;
-  justify-content: flex-start;
-  height: 3px;
-  overflow: hidden;
-  border-radius: 999px;
-  background: color-mix(in srgb, var(--overlay) 8%, transparent);
-}
-
-.diff-strip__change-meter-fill {
-  display: flex;
-  min-width: 5px;
-  height: 100%;
-  overflow: hidden;
-  border-radius: 999px;
-  background: color-mix(in srgb, var(--status-attention) 28%, transparent);
-}
-
-.diff-strip__change-meter-add,
-.diff-strip__change-meter-del {
-  height: 100%;
-}
-
-.diff-strip__change-meter-add {
-  background: var(--diff-add);
-}
-
-.diff-strip__change-meter-del {
-  background: var(--diff-del);
-}
-
-.diff-strip__change-meter[data-tone="mixed"] .diff-strip__change-meter-add {
-  border-radius: 999px 0 0 999px;
-}
-
-.diff-strip__change-meter[data-tone="mixed"] .diff-strip__change-meter-del {
-  border-radius: 0 999px 999px 0;
-}
-
-/* ── Diff strip tooltip ──────────────────────────────────── */
-
-.diff-strip__tooltip {
-  position: fixed;
-  z-index: 200;
-  min-width: 180px;
-  max-width: 280px;
-  padding: 10px 12px;
-  background: var(--glass-panel-strong);
-  border: 1px solid var(--glass-border-strong);
-  border-radius: var(--radius-md);
-  box-shadow: var(--glass-shadow);
-  backdrop-filter: blur(12px);
-  -webkit-backdrop-filter: blur(12px);
-  pointer-events: none;
-}
-
-.diff-strip__tooltip-header {
-  display: flex;
-  align-items: baseline;
-  justify-content: space-between;
-  gap: 8px;
-  margin-bottom: 8px;
-}
-
-.diff-strip__tooltip-filename {
-  font-size: 12px;
-  font-weight: 600;
-  color: var(--text-primary);
-  overflow: hidden;
-  text-overflow: ellipsis;
-  white-space: nowrap;
-  min-width: 0;
-}
-
-.diff-strip__tooltip-status {
-  font-size: 11px;
-  font-weight: 600;
-  font-family: monospace;
-  flex-shrink: 0;
-}
-
-.diff-strip__tooltip-status[data-status="M"] { color: var(--status-attention); }
-.diff-strip__tooltip-status[data-status="A"] { color: var(--status-added); }
-.diff-strip__tooltip-status[data-status="?"] { color: var(--status-added); }
-.diff-strip__tooltip-status[data-status="D"] { color: var(--status-deleted); }
-.diff-strip__tooltip-status[data-status="R"] { color: var(--status-attention); }
-.diff-strip__tooltip-status[data-status="U"] { color: var(--status-crashed); }
-
-.diff-strip__tooltip-rows {
-  display: flex;
-  flex-direction: column;
-  gap: 4px;
-  padding-bottom: 6px;
-  margin-bottom: 6px;
-  border-bottom: 1px solid var(--glass-border);
-}
-
-.diff-strip__tooltip-row {
-  display: flex;
-  justify-content: space-between;
-  gap: 16px;
-  font-size: 11px;
-  font-variant-numeric: tabular-nums;
-}
-
-.diff-strip__tooltip-row--add { color: var(--diff-add); }
-.diff-strip__tooltip-row--del { color: var(--diff-del); }
-
-.diff-strip__tooltip-path {
-  font-size: 10px;
-  color: var(--text-muted);
-  opacity: 0.6;
-  overflow: hidden;
-  text-overflow: ellipsis;
-  white-space: nowrap;
-  font-family: monospace;
 }
 
 /* ── Todos panel ───────────────────────────────────────────────────── */

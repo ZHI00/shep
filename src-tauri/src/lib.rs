@@ -26,7 +26,6 @@ pub fn run() {
     let app = tauri::Builder::default()
         .plugin(tauri_plugin_dialog::init())
         .plugin(tauri_plugin_notification::init())
-        .plugin(tauri_plugin_updater::Builder::new().build())
         .plugin(tauri_plugin_process::init())
         .manage(PtyManager::new())
         .manage(WorkspaceManager::new())
@@ -53,6 +52,20 @@ pub fn run() {
             std::thread::spawn(move || {
                 usage::run_background_ingest(&db);
                 let _ = handle.emit("usage-ingest-complete", ());
+            });
+
+            // The window starts hidden and the frontend reveals it after its
+            // first paint. If that call never arrives — a bundle that failed
+            // to load, a crash before mount — show it anyway rather than
+            // leaving the user with an app that appears not to have started.
+            let reveal_handle = app.handle().clone();
+            std::thread::spawn(move || {
+                std::thread::sleep(std::time::Duration::from_secs(4));
+                if let Some(window) = reveal_handle.get_webview_window("main") {
+                    if !window.is_visible().unwrap_or(false) {
+                        let _ = window.show();
+                    }
+                }
             });
 
             menu::setup(app.handle())?;
@@ -121,6 +134,7 @@ pub fn run() {
             commands::get_home_directory,
             commands::get_default_shell,
             commands::get_computer_name,
+            commands::show_main_window,
             commands::is_git_repo,
             commands::git_init,
             commands::git_current_branch,

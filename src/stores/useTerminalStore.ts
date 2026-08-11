@@ -17,6 +17,8 @@ interface TerminalStore {
   removeProject: (repoPath: string) => void;
   addTab: (tab: UnifiedTab) => void;
   removeTab: (id: string) => void;
+  detachTab: (id: string) => void;
+  attachTab: (id: string) => void;
   setActiveTab: (id: string) => void;
   updateTab: (id: string, patch: Partial<Pick<UnifiedTab, "label">>) => void;
   setTabTitleFromPty: (ptyId: number, title: string) => void;
@@ -39,6 +41,25 @@ interface TerminalStore {
 
 function emptyState(): ProjectTerminalState {
   return { tabs: [], activeTabId: null };
+}
+
+/** Running but hidden from the tab bar. Panel tabs are never detached. */
+export function isTabDetached(tab: UnifiedTab): boolean {
+  return (tab.kind === "terminal" || tab.kind === "assistant") && tab.detached === true;
+}
+
+/**
+ * Nearest tab still visible in the tab bar, searching right then left — the
+ * same direction a closed tab hands focus off in.
+ */
+function nearestVisibleTabId(tabs: UnifiedTab[], fromIndex: number): string | null {
+  for (let i = fromIndex; i < tabs.length; i += 1) {
+    if (!isTabDetached(tabs[i])) return tabs[i].id;
+  }
+  for (let i = fromIndex - 1; i >= 0; i -= 1) {
+    if (!isTabDetached(tabs[i])) return tabs[i].id;
+  }
+  return null;
 }
 
 let tabCounter = 0;
@@ -154,7 +175,14 @@ export const useTerminalStore = create<TerminalStore>((set, get) => ({
 
   addTab: (tab: UnifiedTab) => {
     set((state) => {
-      const path = state.activeProjectPath;
+      // A PTY-backed tab already knows its project; trusting that over the
+      // current selection keeps it from landing in the wrong one when the
+      // selection changed while its PTY was still spawning. A tab filed under
+      // one project but stamped with another never becomes visible, since
+      // TerminalView requires the two to agree.
+      const path = tab.kind === "terminal" || tab.kind === "assistant"
+        ? tab.repoPath
+        : state.activeProjectPath;
       if (!path) return state;
       const ps = state.projectState[path] ?? emptyState();
       return {
@@ -192,6 +220,60 @@ export const useTerminalStore = create<TerminalStore>((set, get) => ({
           [path]: { tabs, activeTabId },
         },
       };
+    });
+  },
+
+  /**
+   * Hides a tab from the tab bar without touching its PTY. The session keeps
+   * running and stays listed under its project.
+   */
+  detachTab: (id: string) => {
+    set((state) => {
+      const path = state.activeProjectPath;
+      if (!path) return state;
+      const ps = state.projectState[path];
+      if (!ps) return state;
+      const index = ps.tabs.findIndex((t) => t.id === id);
+      if (index === -1) return state;
+      const tab = ps.tabs[index];
+      if (tab.kind !== "terminal" && tab.kind !== "assistant") return state;
+      if (tab.detached) return state;
+
+      const tabs = [...ps.tabs];
+      tabs[index] = { ...tab, detached: true };
+      const activeTabId = ps.activeTabId === id
+        ? nearestVisibleTabId(tabs, index)
+        : ps.activeTabId;
+
+      return {
+        projectState: {
+          ...state.projectState,
+          [path]: { tabs, activeTabId },
+        },
+      };
+    });
+  },
+
+  /** Brings a detached session back into the tab bar. */
+  attachTab: (id: string) => {
+    set((state) => {
+      for (const [path, project] of Object.entries(state.projectState)) {
+        const index = project.tabs.findIndex((t) => t.id === id);
+        if (index === -1) continue;
+        const tab = project.tabs[index];
+        if (tab.kind !== "terminal" && tab.kind !== "assistant") return state;
+        if (!tab.detached) return state;
+
+        const tabs = [...project.tabs];
+        tabs[index] = { ...tab, detached: false };
+        return {
+          projectState: {
+            ...state.projectState,
+            [path]: { ...project, tabs },
+          },
+        };
+      }
+      return state;
     });
   },
 

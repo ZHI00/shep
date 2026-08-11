@@ -16,6 +16,7 @@
         "title": "Shep",
         "width": 1200,
         "height": 800,
+        "visible": false,
         "minWidth": 800,
         "minHeight": 600,
         "resizable": true,
@@ -58,7 +59,7 @@
   "bundle": {
     "active": true,
     "targets": "all",
-    "createUpdaterArtifacts": true,
+    "createUpdaterArtifacts": false,
     "icon": [
       "icons/32x32.png",
       "icons/128x128.png",
@@ -70,12 +71,5 @@
       "entitlements": "./Entitlements.plist"
     }
   },
-  "plugins": {
-    "updater": {
-      "endpoints": [
-        "https://github.com/stumptowndoug/shep/releases/latest/download/latest.json"
-      ],
-      "pubkey": "dW50cnVzdGVkIGNvbW1lbnQ6IG1pbmlzaWduIHB1YmxpYyBrZXk6IDFENUI5MjhFQ0I1QThGM0IKUldRN2oxckxqcEpiSGZocmVQUDBpSFN4dDFZempVSWgrMDNzZmFCWHphTkpSR2xvaDZvMzAyNVUK"
-    }
-  }
+  "plugins": {}
 }

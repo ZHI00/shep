@@ -8,6 +8,7 @@ import { useProjectSettingsStore } from "../../stores/useProjectSettingsStore";
 import { HandMetal, ChevronDown, Check, Info, X } from "lucide-react";
 import { assistantLogoSrc, getAssistantLogoClass } from "../../lib/assistantLogos";
 import { ASSISTANT_INSTALL_URLS } from "../sidebar/constants";
+import { applyAssistantOverride } from "../../lib/assistants";
 
 interface SessionLauncherProps {
   onStartSession: (
@@ -20,6 +21,7 @@ interface SessionLauncherProps {
 export default function SessionLauncher({ onStartSession }: SessionLauncherProps) {
   const activeRepoPath = useRepoStore((s) => s.activeRepoPath);
   const defaultAgentMode = useProjectSettingsStore((s) => s.settings.defaultAgentMode);
+  const assistantOverrides = useProjectSettingsStore((s) => s.settings.assistantOverrides);
 
   const [selectedAssistant, setSelectedAssistant] = useState<CodingAssistant | null>(null);
   const [available, setAvailable] = useState<Record<string, boolean>>({});
@@ -48,20 +50,22 @@ export default function SessionLauncher({ onStartSession }: SessionLauncherProps
   const [piKeyInputs, setPiKeyInputs] = useState({ provider: "", key: "" });
   const [piInfoOpen, setPiInfoOpen] = useState(false);
 
-  // Check which assistants are installed
+  // Check which assistants are installed. Re-runs when overrides change so a
+  // custom command is probed instead of the built-in one it replaced.
   useEffect(() => {
     let cancelled = false;
     (async () => {
       const results: Record<string, boolean> = {};
       await Promise.all(
         CODING_ASSISTANTS.map(async (a) => {
-          results[a.id] = await checkCommandExists(a.command).catch(() => false);
+          const resolved = applyAssistantOverride(a, assistantOverrides[a.id]);
+          results[a.id] = await checkCommandExists(resolved.command).catch(() => false);
         }),
       );
       if (!cancelled) setAvailable(results);
     })();
     return () => { cancelled = true; };
-  }, []);
+  }, [assistantOverrides]);
 
   // Close install popover on outside click
   useEffect(() => {

@@ -1,6 +1,7 @@
 import { ChartNoAxesCombined, History, Radio } from "lucide-react";
 import { useUIStore } from "../../stores/useUIStore";
 import GearIcon from "./icons/GearIcon";
+import { useT } from "../../stores/useLanguageStore";
 
 export default function SidebarFooter() {
   const settingsActive = useUIStore((s) => s.settingsActive);
@@ -8,6 +9,7 @@ export default function SidebarFooter() {
   const portsActive = useUIStore((s) => s.portsPanelActive);
   const historyActive = useUIStore((s) => s.historyPanelActive);
   const { toggleSettings, toggleUsagePanel, togglePortsPanel, toggleHistoryPanel } = useUIStore.getState();
+  const t = useT();
   const base = "sidebar-footer-btn";
 
   return (
@@ -19,7 +21,7 @@ export default function SidebarFooter() {
           aria-label="Open settings"
         >
           <GearIcon size={20} />
-          <span className="text-[10px]">Settings</span>
+          <span className="text-[10px]">{t("sidebar.settings")}</span>
         </button>
         <button
           onClick={toggleHistoryPanel}
@@ -27,7 +29,7 @@ export default function SidebarFooter() {
           aria-label="Open session history"
         >
           <History size={18} />
-          <span className="text-[10px]">History</span>
+          <span className="text-[10px]">{t("sidebar.history")}</span>
         </button>
         <button
           onClick={toggleUsagePanel}
@@ -35,7 +37,7 @@ export default function SidebarFooter() {
           aria-label="Open usage"
         >
           <ChartNoAxesCombined size={18} />
-          <span className="text-[10px]">Usage</span>
+          <span className="text-[10px]">{t("sidebar.usage")}</span>
         </button>
         <button
           onClick={togglePortsPanel}
@@ -43,7 +45,7 @@ export default function SidebarFooter() {
           aria-label="Open ports"
         >
           <Radio size={18} />
-          <span className="text-[10px]">Ports</span>
+          <span className="text-[10px]">{t("sidebar.ports")}</span>
         </button>
       </div>
     </div>

@@ -12,8 +12,11 @@ import { useRepoStore } from "../../stores/useRepoStore";
 import { useTodoStore } from "../../stores/useTodoStore";
 import { useTerminalSettingsStore } from "../../stores/useTerminalSettingsStore";
 import { useUsageSettingsStore } from "../../stores/useUsageSettingsStore";
-import { useUpdateStore } from "../../stores/useUpdateStore";
 import { assistantLogoSrc, getAssistantLogoClass } from "../../lib/assistantLogos";
+import { CODING_ASSISTANTS } from "../sidebar/constants";
+import { formatArgString, parseArgString } from "../../lib/assistants";
+import { useLanguageStore, useT } from "../../stores/useLanguageStore";
+import { LANGUAGES } from "../../lib/i18n";
 import {
   FONT_SIZE_OPTIONS,
   TERMINAL_FONT_FAMILY,
@@ -95,15 +98,38 @@ export default function SettingsPanel() {
   const updateProvider = useUsageSettingsStore((s) => s.updateProvider);
   const [budgetInputs, setBudgetInputs] = useState<Record<string, string>>({});
 
-  const updateStatus = useUpdateStore((s) => s.status);
-  const availableVersion = useUpdateStore((s) => s.availableVersion);
-  const releaseNotesUrl = useUpdateStore((s) => s.releaseNotesUrl);
-  const downloadProgress = useUpdateStore((s) => s.downloadProgress);
-  const updateError = useUpdateStore((s) => s.error);
-  const hasChecked = useUpdateStore((s) => s.hasChecked);
-  const checkForUpdate = useUpdateStore((s) => s.checkForUpdate);
-  const downloadAndInstall = useUpdateStore((s) => s.downloadAndInstall);
-  const restartApp = useUpdateStore((s) => s.restartApp);
+  const t = useT();
+  const language = useLanguageStore((s) => s.language);
+  const setLanguage = useLanguageStore((s) => s.setLanguage);
+
+  // Assistant command lines are drafted locally and written on blur, so the
+  // config file isn't rewritten on every keystroke.
+  const [assistantDrafts, setAssistantDrafts] = useState<Record<string, string>>({});
+
+  const setAssistantDraft = (id: string, value: string) => {
+    setAssistantDrafts((prev) => ({ ...prev, [id]: value }));
+  };
+
+  const commitAssistantOverride = (id: string, commandLine: string) => {
+    // One field holds the whole invocation; the first token is the executable
+    // and the rest are its arguments, which is the shape spawn needs.
+    const tokens = parseArgString(commandLine);
+    const next = { ...projectSettings.assistantOverrides };
+    if (tokens.length === 0) {
+      // Blank means "use the built-in" — drop the entry rather than storing
+      // an empty override.
+      delete next[id];
+    } else {
+      next[id] = { command: tokens[0], args: tokens.slice(1) };
+    }
+    setAssistantDrafts((prev) => {
+      const remaining = { ...prev };
+      delete remaining[id];
+      return remaining;
+    });
+    void updateProjectSettings({ assistantOverrides: next });
+  };
+
 
   useEffect(() => {
     if (!hasLoaded) void loadSettings();
@@ -234,17 +260,40 @@ export default function SettingsPanel() {
 
   return (
     <div className="absolute inset-0 overflow-y-auto pt-3 pb-6">
+      {/* ── Language ───────────────────────────────────────── */}
+      <section className="settings-section">
+        <h2 className="section-label !p-0 settings-section__header">{t("settings.language")}</h2>
+
+        <div className="settings-row !mb-0">
+          <span className="settings-row__label flex items-center gap-2">
+            <span>{t("settings.language")}</span>
+            <InfoTip text={t("settings.languageHint")} />
+          </span>
+          <div className="flex flex-wrap gap-2">
+            {LANGUAGES.map((option) => (
+              <button
+                key={option.id}
+                onClick={() => setLanguage(option.id)}
+                className={`option-card option-card--compact ${language === option.id ? "selected" : ""}`}
+              >
+                {option.label}
+              </button>
+            ))}
+          </div>
+        </div>
+      </section>
+
       {/* ── Theme ──────────────────────────────────────────── */}
       <section className="settings-section">
-        <h2 className="section-label !p-0 settings-section__header">Theme</h2>
+        <h2 className="section-label !p-0 settings-section__header">{t("settings.theme")}</h2>
 
         <div className="flex flex-wrap gap-3">
-          {[...DARK_THEMES, ...LIGHT_THEMES, ...TRANSPARENT_THEMES].map((t) => {
-            const active = t.id === themeId;
+          {[...DARK_THEMES, ...LIGHT_THEMES, ...TRANSPARENT_THEMES].map((theme) => {
+            const active = theme.id === themeId;
             return (
               <button
-                key={t.id}
-                onClick={() => setTheme(t.id)}
+                key={theme.id}
+                onClick={() => setTheme(theme.id)}
                 className={`${optionClass} ${active ? "selected" : ""}`}
               >
                 <div
@@ -252,10 +301,10 @@ export default function SettingsPanel() {
                   style={{
                     width: 24,
                     height: 24,
-                    background: `linear-gradient(135deg, ${t.bgRadial1} 0%, ${t.bgLinearMid} 50%, ${t.bgRadial3} 100%)`,
+                    background: `linear-gradient(135deg, ${theme.bgRadial1} 0%, ${theme.bgLinearMid} 50%, ${theme.bgRadial3} 100%)`,
                   }}
                 />
-                <span>{t.name}</span>
+                <span>{theme.name}</span>
               </button>
             );
           })}
@@ -313,7 +362,7 @@ export default function SettingsPanel() {
 
       {/* ── Editor ─────────────────────────────────────────── */}
       <section className="settings-section">
-        <h2 className="section-label !p-0 settings-section__header">Editor</h2>
+        <h2 className="section-label !p-0 settings-section__header">{t("settings.editor")}</h2>
 
         <div className="flex flex-wrap gap-3">
           {EDITOR_OPTIONS.map((option) => {
@@ -343,7 +392,7 @@ export default function SettingsPanel() {
 
       {/* ── Keybindings ────────────────────────────────────── */}
       <section className="settings-section">
-        <h2 className="section-label !p-0 settings-section__header">Keybindings</h2>
+        <h2 className="section-label !p-0 settings-section__header">{t("settings.keybindings")}</h2>
 
         <div className="flex flex-wrap gap-3">
           {KEYBINDING_PRESETS.map((preset) => {
@@ -371,24 +420,24 @@ export default function SettingsPanel() {
 
       {/* ── Projects ───────────────────────────────────────── */}
       <section className="settings-section">
-        <h2 className="section-label !p-0 settings-section__header">Projects</h2>
+        <h2 className="section-label !p-0 settings-section__header">{t("settings.projects")}</h2>
 
         <div className="settings-row">
           <span className="settings-row__label flex items-center gap-2">
-            <span>Auto-import Worktrees</span>
+            <span>{t("settings.autoImportWorktrees")}</span>
             <InfoTip text="When enabled, adding a main repo also imports its existing Git worktrees. Adding a worktree directly still adds its main repo so the relationship stays intact." />
           </span>
           <button
             onClick={() => void updateProjectSettings({ autoImportWorktrees: !projectSettings.autoImportWorktrees })}
             className={`option-card option-card--compact ${projectSettings.autoImportWorktrees ? "selected" : ""}`}
           >
-            {projectSettings.autoImportWorktrees ? "On" : "Off"}
+            {projectSettings.autoImportWorktrees ? t("common.on") : t("common.off")}
           </button>
         </div>
 
         <div className="settings-row">
           <span className="settings-row__label flex items-center gap-2">
-            <span>Agent Label</span>
+            <span>{t("settings.agentLabel")}</span>
             <InfoTip text="Choose what identifies live agents in tabs and the sidebar. Session titles are still retained for history when Repository is selected. Manual tab renames always take priority." />
           </span>
           <div className="flex flex-wrap gap-2">
@@ -396,20 +445,44 @@ export default function SettingsPanel() {
               onClick={() => void updateProjectSettings({ agentLabelMode: "repository" })}
               className={`option-card option-card--compact ${projectSettings.agentLabelMode === "repository" ? "selected" : ""}`}
             >
-              Repository
+              {t("settings.agentLabel.repository")}
             </button>
             <button
               onClick={() => void updateProjectSettings({ agentLabelMode: "title" })}
               className={`option-card option-card--compact ${projectSettings.agentLabelMode === "title" ? "selected" : ""}`}
             >
-              Session title
+              {t("settings.agentLabel.title")}
             </button>
           </div>
         </div>
 
         <div className="settings-row">
           <span className="settings-row__label flex items-center gap-2">
-            <span>Default Agent Mode</span>
+            <span>{t("settings.defaultAssistant")}</span>
+            <InfoTip text={t("settings.defaultAssistantHint")} />
+          </span>
+          <div className="flex flex-wrap gap-2">
+            <button
+              onClick={() => void updateProjectSettings({ defaultAssistant: "" })}
+              className={`option-card option-card--compact ${projectSettings.defaultAssistant === "" ? "selected" : ""}`}
+            >
+              {t("settings.defaultAssistant.ask")}
+            </button>
+            {CODING_ASSISTANTS.map((assistant) => (
+              <button
+                key={assistant.id}
+                onClick={() => void updateProjectSettings({ defaultAssistant: assistant.id })}
+                className={`option-card option-card--compact ${projectSettings.defaultAssistant === assistant.id ? "selected" : ""}`}
+              >
+                {assistant.name}
+              </button>
+            ))}
+          </div>
+        </div>
+
+        <div className="settings-row">
+          <span className="settings-row__label flex items-center gap-2">
+            <span>{t("settings.defaultAgentMode")}</span>
             <InfoTip text="YOLO starts supported agents with permission checks disabled and also applies when resuming sessions. Pi already runs tools without a separate approval layer." />
           </span>
           <div className="flex flex-wrap gap-2">
@@ -417,25 +490,68 @@ export default function SettingsPanel() {
               onClick={() => void updateProjectSettings({ defaultAgentMode: "standard" })}
               className={`option-card option-card--compact ${projectSettings.defaultAgentMode === "standard" ? "selected" : ""}`}
             >
-              Standard
+              {t("settings.defaultAgentMode.standard")}
             </button>
             <button
               onClick={() => void updateProjectSettings({ defaultAgentMode: "yolo" })}
               className={`option-card option-card--compact ${projectSettings.defaultAgentMode === "yolo" ? "selected" : ""}`}
               title="Start agents with approval prompts disabled"
             >
-              YOLO
+              {t("settings.defaultAgentMode.yolo")}
             </button>
           </div>
         </div>
 
-        {projectIsSaving && <div className="mt-2 text-xs text-[var(--text-muted)]">Saving project settings...</div>}
+        {projectIsSaving && <div className="mt-2 text-xs text-[var(--text-muted)]">{t("settings.savingProject")}</div>}
         {projectError && <div className="mt-2 text-sm text-red-300">{projectError}</div>}
+      </section>
+
+      {/* ── Agent commands ─────────────────────────────────── */}
+      <section className="settings-section">
+        <h2 className="section-label !p-0 settings-section__header">{t("settings.agentCommands")}</h2>
+        <p className="settings-section__hint">{t("settings.agentCommandsHint")}</p>
+
+        {CODING_ASSISTANTS.map((assistant) => {
+          const override = projectSettings.assistantOverrides[assistant.id];
+          const stored = override
+            ? formatArgString([override.command, ...override.args].filter(Boolean))
+            : "";
+          const value = assistantDrafts[assistant.id] ?? stored;
+
+          return (
+            <div className="assistant-command-row" key={assistant.id}>
+              <div className="assistant-command-row__head">
+                <span className="assistant-command-row__name">{assistant.name}</span>
+                {stored && (
+                  <button
+                    className="assistant-command-row__reset"
+                    onClick={() => commitAssistantOverride(assistant.id, "")}
+                    title={t("settings.resetTo", { name: assistant.name, command: assistant.command })}
+                  >
+                    {t("common.reset")}
+                  </button>
+                )}
+              </div>
+              <input
+                className="assistant-command-row__input"
+                type="text"
+                spellCheck={false}
+                autoComplete="off"
+                autoCapitalize="off"
+                placeholder={assistant.command}
+                value={value}
+                onChange={(e) => setAssistantDraft(assistant.id, e.target.value)}
+                onBlur={() => commitAssistantOverride(assistant.id, value)}
+                aria-label={t("settings.launchCommand", { name: assistant.name })}
+              />
+            </div>
+          );
+        })}
       </section>
 
       {/* ── To-dos ─────────────────────────────────────────── */}
       <section className="settings-section">
-        <h2 className="section-label !p-0 settings-section__header">To-dos</h2>
+        <h2 className="section-label !p-0 settings-section__header">{t("settings.todos")}</h2>
 
         <div className="settings-row">
           <span className="settings-row__label flex items-center gap-2">
@@ -481,7 +597,7 @@ export default function SettingsPanel() {
 
       {/* ── Terminal ───────────────────────────────────────── */}
       <section className="settings-section">
-        <h2 className="section-label !p-0 settings-section__header">Terminal</h2>
+        <h2 className="section-label !p-0 settings-section__header">{t("settings.terminal")}</h2>
 
         <div className="settings-row">
           <span className="settings-row__label">Cursor</span>
@@ -617,7 +733,7 @@ export default function SettingsPanel() {
 
       {/* ── Usage ──────────────────────────────────────────── */}
       <section className="settings-section">
-        <h2 className="section-label !p-0 settings-section__header">Usage Providers</h2>
+        <h2 className="section-label !p-0 settings-section__header">{t("settings.usage")}</h2>
 
         <div className="usage-provider-grid">
           {ALL_USAGE_PROVIDERS.map((provider) => {
@@ -700,73 +816,6 @@ export default function SettingsPanel() {
         <p className="text-xs text-[var(--text-muted)] mt-4">
           Settings are saved to ~/.shep/config.yml
         </p>
-      </section>
-
-      {/* ── Updates ─────────────────────────────────────────── */}
-      <section className="settings-section">
-        <h2 className="section-label !p-0 settings-section__header">Updates</h2>
-
-        {updateStatus === "available" && (
-          <div className="settings-meta-grid mb-4" style={{ border: "1px solid rgba(122,162,247,0.3)", borderRadius: 8, padding: 12 }}>
-            <div className="settings-meta-row">
-              <span className="settings-meta-row__label">New version</span>
-              <span>{availableVersion}</span>
-            </div>
-            {releaseNotesUrl && (
-              <div className="settings-meta-row">
-                <span className="settings-meta-row__label">Release notes</span>
-                <button
-                  className="text-sm underline text-[var(--text-secondary)] hover:text-[var(--text-primary)] bg-transparent border-0 cursor-pointer p-0"
-                  onClick={() => import("../../lib/tauri").then((mod) => mod.openUrl(releaseNotesUrl))}
-                >
-                  View on GitHub
-                </button>
-              </div>
-            )}
-            <button
-              className="btn-primary mt-2"
-              onClick={() => void downloadAndInstall()}
-            >
-              Download &amp; Install
-            </button>
-          </div>
-        )}
-
-        {updateStatus === "downloading" && (
-          <div className="mb-4">
-            <div className="update-progress-track mb-2">
-              <div className="update-progress-fill" style={{ width: `${downloadProgress}%` }} />
-            </div>
-            <div className="text-xs text-[var(--text-muted)]">Downloading... {downloadProgress}%</div>
-          </div>
-        )}
-
-        {updateStatus === "ready" && (
-          <div className="mb-4">
-            <div className="text-sm text-[var(--text-secondary)] mb-2">Update downloaded and ready to install.</div>
-            <button className="btn-primary" onClick={() => void restartApp()}>
-              Restart Now
-            </button>
-          </div>
-        )}
-
-        {updateStatus === "error" && updateError && (
-          <div className="text-sm text-red-300 mb-4">{updateError}</div>
-        )}
-
-        {updateStatus !== "downloading" && updateStatus !== "ready" && (
-          <button
-            className="btn-primary"
-            disabled={updateStatus === "checking"}
-            onClick={() => void checkForUpdate()}
-          >
-            {updateStatus === "checking" ? "Checking..." : "Check for Updates"}
-          </button>
-        )}
-
-        {updateStatus === "idle" && hasChecked && (
-          <div className="text-xs text-[var(--text-muted)] mt-2">You're on the latest version.</div>
-        )}
       </section>
 
       {/* ── About ───────────────────────────────────────────── */}

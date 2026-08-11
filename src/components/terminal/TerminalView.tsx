@@ -41,6 +41,8 @@ export default function TerminalView({
   const mountedRef = useRef(false);
   const attachedRef = useRef(false);
   const pinnedToBottomRef = useRef(true);
+  /** True while an IME composition is in flight (CJK, accents, emoji picker). */
+  const composingRef = useRef(false);
   const columnResizeTimerRef = useRef<ReturnType<typeof setTimeout> | null>(null);
 
   const getOrCreateTerminal = useCallback(() => {
@@ -223,6 +225,13 @@ export default function TerminalView({
       else syncPinnedAfterEvent();
     };
     const handleKeyDownCapture = (event: KeyboardEvent) => {
+      // While an IME is composing, every keystroke is part of an unfinished
+      // character. Scrolling now moves xterm's hidden textarea out from under
+      // the candidate window and drops the composition — which is why CJK
+      // input needed a second attempt. keyCode 229 is the legacy signal some
+      // IMEs still send instead of isComposing.
+      if (composingRef.current || event.isComposing || event.keyCode === 229) return;
+
       const viewportKey = event.shiftKey && [
         "PageUp",
         "PageDown",
@@ -243,8 +252,21 @@ export default function TerminalView({
       pinnedToBottomRef.current = true;
       term.scrollToBottom();
     };
+    // compositionend fires before the final keydown, so the flag is cleared on
+    // the next tick to cover that trailing event too.
+    const handleCompositionStart = () => {
+      composingRef.current = true;
+    };
+    const handleCompositionEnd = () => {
+      window.setTimeout(() => {
+        composingRef.current = false;
+      }, 0);
+    };
+
     surface.addEventListener("wheel", handleWheelCapture, { capture: true });
     surface.addEventListener("keydown", handleKeyDownCapture, { capture: true });
+    surface.addEventListener("compositionstart", handleCompositionStart, { capture: true });
+    surface.addEventListener("compositionend", handleCompositionEnd, { capture: true });
 
     const attachTerminal = async () => {
       await new Promise<void>((resolve) => requestAnimationFrame(() => resolve()));
@@ -354,6 +376,8 @@ export default function TerminalView({
       observer.disconnect();
       surface.removeEventListener("wheel", handleWheelCapture, { capture: true });
       surface.removeEventListener("keydown", handleKeyDownCapture, { capture: true });
+      surface.removeEventListener("compositionstart", handleCompositionStart, { capture: true });
+      surface.removeEventListener("compositionend", handleCompositionEnd, { capture: true });
       if (columnResizeTimerRef.current) {
         clearTimeout(columnResizeTimerRef.current);
         columnResizeTimerRef.current = null;

@@ -31,7 +31,7 @@ export interface RegisteredRepo {
   workspace: WorkspaceConfig;
 }
 
-export type PreferredEditor = "vscode" | "zed" | "cursor" | "sublime_text";
+export type PreferredEditor = "vscode" | "zed" | "cursor" | "sublime_text" | "trae";
 
 export interface EditorSettings {
   preferredEditor: PreferredEditor | null;
@@ -47,6 +47,21 @@ export interface ProjectSettings {
   showTodos: boolean;
   /** Shape of a lazily created TODO.md. */
   todoFileStyle: TodoFileStyle;
+  /** Per-assistant launch overrides, keyed by assistant id. */
+  assistantOverrides: Record<string, AssistantLaunchOverride>;
+  /**
+   * Assistant started directly by the "Agent" action. Empty string means ask
+   * every time by opening the launcher.
+   */
+  defaultAssistant: string;
+}
+
+/** User-supplied replacement for a built-in assistant's launch command. */
+export interface AssistantLaunchOverride {
+  /** Executable to run instead of the built-in one. Blank = keep built-in. */
+  command: string;
+  /** Extra arguments prepended to every launch of this assistant. */
+  args: string[];
 }
 
 export interface KeybindingSettings {
@@ -119,6 +134,12 @@ export interface TerminalTabData extends TabBase {
   providerSessionId: string | null;
   sessionMode: SessionMode | null;
   labelSource: TerminalLabelSource;
+  /**
+   * Hidden from the tab bar but still running. Closing a tab up top only
+   * stops you watching it; the session stays listed under its project until
+   * it is explicitly closed from there.
+   */
+  detached?: boolean;
 }
 
 export interface SessionHistoryUpsert {

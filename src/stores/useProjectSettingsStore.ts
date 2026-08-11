@@ -5,9 +5,11 @@ import { getProjectSettings, saveProjectSettings } from "../lib/tauri";
 const DEFAULT_SETTINGS: ProjectSettings = {
   autoImportWorktrees: true,
   agentLabelMode: "repository",
-  defaultAgentMode: "yolo",
+  defaultAgentMode: "standard",
   showTodos: true,
   todoFileStyle: "kanban",
+  assistantOverrides: {},
+  defaultAssistant: "",
 };
 
 interface ProjectSettingsStore {
@@ -31,7 +33,11 @@ export const useProjectSettingsStore = create<ProjectSettingsStore>((set, get) =
       set({
         settings: {
           ...settings,
-          defaultAgentMode: settings.defaultAgentMode === "standard" ? "standard" : "yolo",
+          // Anything but an explicit "yolo" means approvals stay on.
+          defaultAgentMode: settings.defaultAgentMode === "yolo" ? "yolo" : "standard",
+          // Configs written before these existed have no such keys.
+          assistantOverrides: settings.assistantOverrides ?? {},
+          defaultAssistant: settings.defaultAssistant ?? "",
         },
         hasLoaded: true,
         error: null,

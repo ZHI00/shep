@@ -3,6 +3,7 @@ import {
   acknowledgePtyOutput,
   spawnPty,
   killPty,
+  writePty,
   getDefaultShell,
   getAgentRuntimeStatus,
   resolveSessionTitle,
@@ -25,10 +26,10 @@ import { useTerminalStore, nextTabId } from "../stores/useTerminalStore";
 import { useRepoStore } from "../stores/useRepoStore";
 import { useNoticeStore } from "../stores/useNoticeStore";
 import { useProjectSettingsStore } from "../stores/useProjectSettingsStore";
-import { CODING_ASSISTANTS } from "../components/sidebar/constants";
+import { buildShellCommandLine, extraLaunchArgs, resolveAssistant } from "../lib/assistants";
 import type { Terminal } from "@xterm/xterm";
 import { getErrorMessage } from "../lib/errors";
-import { sessionResumeArgs } from "../lib/sessionResume";
+import { sessionResumeArgs, sessionResumeSlashCommand } from "../lib/sessionResume";
 import {
   clearTerminalPipelineCounters,
   recordPendingOutput,
@@ -220,6 +221,64 @@ function effectiveAgentObservation(
   }
 
   return observation;
+}
+
+/**
+ * Waits for a freshly spawned shell to produce output — its prompt — before
+ * typing into it. Writing too early risks the line being discarded while the
+ * shell is still setting up its line editor. Gives up after a moment so a
+ * silent prompt can't stall the launch forever.
+ */
+async function waitForShellPrompt(ptyId: number, timeoutMs = 4000): Promise<void> {
+  const deadline = Date.now() + timeoutMs;
+  while (Date.now() < deadline) {
+    const activity = useTerminalStore.getState().tabActivity[ptyId];
+    if (activity && !activity.alive) return;
+    if (activity?.lastOutputAt) {
+      // Let the prompt finish drawing before typing over it.
+      await new Promise((resolve) => setTimeout(resolve, 120));
+      return;
+    }
+    await new Promise((resolve) => setTimeout(resolve, 40));
+  }
+}
+
+/**
+ * Starts an assistant the way you would by hand: open a shell, type the
+ * command, press enter. The shell outlives the agent, so quitting the agent
+ * drops you back at a usable prompt instead of killing the tab.
+ */
+async function typeCommandIntoShell(ptyId: number, commandLine: string): Promise<void> {
+  await waitForShellPrompt(ptyId);
+  const activity = useTerminalStore.getState().tabActivity[ptyId];
+  if (activity && !activity.alive) return;
+  await writePty(ptyId, `${commandLine}\r`).catch(() => {
+    // The tab still exists with a working shell — the user can retype it.
+  });
+}
+
+/**
+ * Waits for a launching agent to settle before typing a slash command into it.
+ * Readiness is inferred from output going quiet: startup work (config, MCP
+ * servers) produces a burst, and the prompt is what's left when it stops.
+ * A spinner that never stops is covered by the overall timeout — sending late
+ * is better than not resuming at all, since the TTY buffers the line either
+ * way.
+ */
+async function waitForAgentReady(
+  ptyId: number,
+  quietMs = 900,
+  timeoutMs = 15000,
+): Promise<boolean> {
+  const deadline = Date.now() + timeoutMs;
+  while (Date.now() < deadline) {
+    const activity = useTerminalStore.getState().tabActivity[ptyId];
+    if (activity && !activity.alive) return false;
+    const lastOutputAt = activity?.lastOutputAt ?? 0;
+    if (lastOutputAt > 0 && Date.now() - lastOutputAt >= quietMs) return true;
+    await new Promise((resolve) => setTimeout(resolve, 100));
+  }
+  return true;
 }
 
 function startAgentStatusObserver(
@@ -902,12 +961,23 @@ export function usePty() {
       rows: number,
       mode: SessionMode = "standard",
       model?: string,
+      /**
+       * Target project. Callers that just switched projects must pass it:
+       * `activeRepoPath` below is captured at render time and still points at
+       * the previous project until React re-renders, which would spawn the PTY
+       * in the wrong directory and leave the tab permanently hidden.
+       */
+      requestedRepoPath?: string,
     ) => {
-      if (!activeRepoPath) return;
-      const assistant = CODING_ASSISTANTS.find((a) => a.id === assistantId);
+      const repoPath = requestedRepoPath ?? activeRepoPath;
+      if (!repoPath) return;
+      const overrides = useProjectSettingsStore.getState().settings.assistantOverrides;
+      const assistant = resolveAssistant(assistantId, overrides);
       if (!assistant) return;
 
-      const commandArgs: string[] = [];
+      // User-configured args go first so Shep's own flags stay closest to the
+      // subcommand and keep their existing precedence.
+      const commandArgs: string[] = [...extraLaunchArgs(assistantId, overrides)];
       if (model) {
         commandArgs.push(assistant.modelFlag, model);
       }
@@ -917,14 +987,18 @@ export function usePty() {
 
       try {
         const startedAfterMs = Date.now();
+        // The PTY runs a login shell and the agent is typed into it, so the
+        // shell survives the agent exiting and the command stays visible in
+        // the scrollback.
+        const shell = await getDefaultShell();
         const ptyId = await spawnSession(
-          assistant.command,
-          commandArgs,
+          `${shell} -l`,
+          null,
           {},
           cols,
           rows,
           null,
-          activeRepoPath,
+          repoPath,
         );
         if (!ptyId) return;
 
@@ -934,15 +1008,17 @@ export function usePty() {
           kind: "assistant",
           label: assistant.name,
           ptyId,
-          repoPath: activeRepoPath,
+          repoPath,
           commandName: null,
           assistantId,
           providerSessionId: null,
           sessionMode: mode,
           labelSource: "default",
         });
-        startSessionTitleResolver(ptyId, assistantId, activeRepoPath, startedAfterMs, model);
-        startAgentStatusObserver(ptyId, assistantId, activeRepoPath);
+
+        void typeCommandIntoShell(ptyId, buildShellCommandLine(assistant.command, commandArgs));
+        startSessionTitleResolver(ptyId, assistantId, repoPath, startedAfterMs, model);
+        startAgentStatusObserver(ptyId, assistantId, repoPath);
 
         return ptyId;
       } catch (e) {
@@ -961,14 +1037,40 @@ export function usePty() {
   );
 
   const resumeAssistant = useCallback(
-    async (session: SessionHistoryEntry, cols: number, rows: number) => {
-      const assistant = CODING_ASSISTANTS.find((entry) => entry.id === session.provider);
-      const resumeArgs = sessionResumeArgs(session.provider, session.sessionId);
-      const mode = useProjectSettingsStore.getState().settings.defaultAgentMode;
-      const commandArgs = resumeArgs && mode === "yolo" && assistant?.yoloFlag
-        ? [assistant.yoloFlag, ...resumeArgs]
-        : resumeArgs;
-      if (!assistant || !commandArgs) {
+    async (
+      session: SessionHistoryEntry,
+      cols: number,
+      rows: number,
+      /**
+       * Permission mode the conversation ran with. Falls back to the global
+       * default only when unknown — reusing the original keeps a session from
+       * silently gaining or losing its approval prompts on resume.
+       */
+      preferredMode?: SessionMode | null,
+    ) => {
+      const projectSettings = useProjectSettingsStore.getState().settings;
+      const overrides = projectSettings.assistantOverrides;
+      const assistant = resolveAssistant(session.provider, overrides);
+      const mode = preferredMode ?? projectSettings.defaultAgentMode;
+
+      // Preferred route: start the agent with the user's normal launch command
+      // and resume from inside it, so no resume flag is spliced into a command
+      // they configured. Providers without a known slash command keep using
+      // the CLI flag.
+      const slashCommand = sessionResumeSlashCommand(session.provider, session.sessionId);
+      const resumeArgs = slashCommand
+        ? null
+        : sessionResumeArgs(session.provider, session.sessionId);
+
+      const launchArgs: string[] = [...extraLaunchArgs(session.provider, overrides)];
+      if (mode === "yolo" && assistant?.yoloFlag) {
+        launchArgs.push(assistant.yoloFlag);
+      }
+      if (resumeArgs) {
+        launchArgs.push(...resumeArgs);
+      }
+
+      if (!assistant || (!slashCommand && !resumeArgs)) {
         pushNotice({
           tone: "error",
           title: "Resume isn’t supported",
@@ -979,9 +1081,11 @@ export function usePty() {
 
       try {
         const resumedAt = Date.now();
+        // Same shape as a fresh launch: shell first, agent typed into it.
+        const shell = await getDefaultShell();
         const ptyId = await spawnSession(
-          assistant.command,
-          commandArgs,
+          `${shell} -l`,
+          null,
           {},
           cols,
           rows,
@@ -989,6 +1093,18 @@ export function usePty() {
           session.projectPath,
         );
         if (!ptyId) return null;
+
+        void (async () => {
+          await typeCommandIntoShell(ptyId, buildShellCommandLine(assistant.command, launchArgs));
+          if (!slashCommand) return;
+          // Wait for the agent's own prompt before typing into it — the shell
+          // prompt it replaced is long gone by then.
+          const ready = await waitForAgentReady(ptyId);
+          if (!ready) return;
+          await writePty(ptyId, `${slashCommand}\r`).catch(() => {
+            // The agent is up; the user can type /resume themselves.
+          });
+        })();
 
         addTab({
           id: nextTabId(),

@@ -397,6 +397,11 @@ export function getComputerName(): Promise<string> {
   return invoke("get_computer_name");
 }
 
+/** Reveals the main window once the UI has painted. */
+export function showMainWindow(): Promise<void> {
+  return invoke("show_main_window");
+}
+
 export function checkCommandExists(command: string): Promise<boolean> {
   return invoke("check_command_exists", { command });
 }

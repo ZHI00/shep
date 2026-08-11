@@ -63,6 +63,23 @@ pub struct ProjectSettings {
     /// Shape of a lazily created TODO.md: "kanban" (columned board) or "list".
     #[serde(default = "default_todo_file_style", rename = "todoFileStyle")]
     pub todo_file_style: String,
+    /// Per-assistant launch overrides, keyed by assistant id (e.g. "claude").
+    #[serde(default, rename = "assistantOverrides")]
+    pub assistant_overrides: HashMap<String, AssistantLaunchOverride>,
+    /// Assistant launched directly by the "Agent" action. Empty = ask each time.
+    #[serde(default, rename = "defaultAssistant")]
+    pub default_assistant: String,
+}
+
+/// User-supplied replacement for a built-in assistant's launch command.
+#[derive(Debug, Clone, Default, Serialize, Deserialize)]
+pub struct AssistantLaunchOverride {
+    /// Executable to run instead of the built-in one. Blank keeps the built-in.
+    #[serde(default)]
+    pub command: String,
+    /// Extra arguments prepended to every launch of this assistant.
+    #[serde(default)]
+    pub args: Vec<String>,
 }
 
 fn default_todo_file_style() -> String {
@@ -74,7 +91,9 @@ fn default_agent_label_mode() -> String {
 }
 
 fn default_agent_session_mode() -> String {
-    "yolo".to_string()
+    // Approval prompts stay on unless the user opts out; skipping them is not
+    // something Shep should decide on their behalf.
+    "standard".to_string()
 }
 
 impl Default for ProjectSettings {
@@ -85,6 +104,8 @@ impl Default for ProjectSettings {
             default_agent_mode: default_agent_session_mode(),
             show_todos: true,
             todo_file_style: default_todo_file_style(),
+            assistant_overrides: HashMap::new(),
+            default_assistant: String::new(),
         }
     }
 }
@@ -347,14 +368,34 @@ mod tests {
     use super::*;
 
     #[test]
-    fn project_settings_default_agent_mode_to_yolo() {
+    fn project_settings_default_agent_mode_to_standard() {
         let settings: ProjectSettings = serde_yaml::from_str(
             "autoImportWorktrees: true\nagentLabelMode: repository\nshowTodos: true\ntodoFileStyle: kanban\n",
         )
         .unwrap();
 
-        assert_eq!(settings.default_agent_mode, "yolo");
-        assert_eq!(ProjectSettings::default().default_agent_mode, "yolo");
+        assert_eq!(settings.default_agent_mode, "standard");
+        assert_eq!(ProjectSettings::default().default_agent_mode, "standard");
+    }
+
+    #[test]
+    fn project_settings_without_assistant_overrides_load_empty() {
+        let settings: ProjectSettings =
+            serde_yaml::from_str("autoImportWorktrees: true\nshowTodos: true\n").unwrap();
+
+        assert!(settings.assistant_overrides.is_empty());
+    }
+
+    #[test]
+    fn project_settings_round_trip_assistant_overrides() {
+        let settings: ProjectSettings = serde_yaml::from_str(
+            "assistantOverrides:\n  claude:\n    command: /usr/local/bin/claude-wrapper\n    args: [\"--verbose\"]\n",
+        )
+        .unwrap();
+
+        let claude = settings.assistant_overrides.get("claude").unwrap();
+        assert_eq!(claude.command, "/usr/local/bin/claude-wrapper");
+        assert_eq!(claude.args, vec!["--verbose".to_string()]);
     }
 
     #[test]

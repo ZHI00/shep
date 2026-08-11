@@ -5,7 +5,7 @@ import TabBar from "./TabBar";
 import TerminalView from "../terminal/TerminalView";
 import TerminalErrorBoundary from "../terminal/TerminalErrorBoundary";
 import NoticeCenter from "../shared/NoticeCenter";
-import { PanelLeft, PanelRight } from "lucide-react";
+import { PanelLeft } from "lucide-react";
 import { useRepoStore } from "../../stores/useRepoStore";
 import { useCommandStore } from "../../stores/useCommandStore";
 import { useTerminalStore } from "../../stores/useTerminalStore";
@@ -20,13 +20,23 @@ import { useGitWatcher } from "../../hooks/useGitWatcher";
 import { computeTerminalSize } from "../../lib/terminalMeasure";
 import { listen } from "@tauri-apps/api/event";
 import { ask } from "@tauri-apps/plugin-dialog";
-import { getUsername, getComputerName, openInEditor, saveWorkspace, shutdownAndQuit, refreshUsageData } from "../../lib/tauri";
+import { useLanguageStore, useT } from "../../stores/useLanguageStore";
+import { agentDisplayLabel } from "../../lib/agentLabels";
+import tabKindMeta from "../../lib/tabKindMeta";
+import { translate, type TranslationKey } from "../../lib/i18n";
+import {
+  toHistoryEntry,
+  useSessionRestoreStore,
+  watchSessionsForRestore,
+  type RestorableSession,
+} from "../../stores/useSessionRestoreStore";
+import { getUsername, getComputerName, openInEditor, saveWorkspace, shutdownAndQuit, refreshUsageData, showMainWindow } from "../../lib/tauri";
 import { useEditorStore } from "../../stores/useEditorStore";
 import { useTerminalSettingsStore } from "../../stores/useTerminalSettingsStore";
 import { useUsageStore } from "../../stores/useUsageStore";
 import { useUsageSettingsStore } from "../../stores/useUsageSettingsStore";
 import { useProjectSettingsStore } from "../../stores/useProjectSettingsStore";
-import { useUpdateStore } from "../../stores/useUpdateStore";
+import { CODING_ASSISTANTS } from "../sidebar/constants";
 import { initNotifications } from "../../lib/notifications";
 import { getErrorMessage } from "../../lib/errors";
 import { useNoticeStore } from "../../stores/useNoticeStore";
@@ -46,7 +56,6 @@ const SessionLauncher = lazy(() => import("../session/SessionLauncher"));
 const UsagePanel = lazy(() => import("../usage/UsagePanel"));
 const PortsPanel = lazy(() => import("../ports/PortsPanel"));
 const HistoryPanel = lazy(() => import("../history/HistoryPanel"));
-const DiffSummaryPanel = lazy(() => import("../git/DiffSummaryPanel"));
 const TodosPanel = lazy(() => import("../todos/TodosPanel"));
 
 function toCommandConfig(command: CommandState): CommandConfig {
@@ -158,18 +167,19 @@ export default function AppShell() {
   );
 
   const {
-    settingsActive, usagePanelActive, portsPanelActive, historyPanelActive, sidebarVisible, diffPanelVisible,
+    settingsActive, usagePanelActive, portsPanelActive, historyPanelActive, sidebarVisible,
   } = useUIStore(useShallow((s) => ({
     settingsActive: s.settingsActive,
     usagePanelActive: s.usagePanelActive,
     portsPanelActive: s.portsPanelActive,
     historyPanelActive: s.historyPanelActive,
     sidebarVisible: s.sidebarVisible,
-    diffPanelVisible: s.diffPanelVisible,
   })));
 
   // Derive which kind of local tab is active (for panel content rendering)
-  const activeTab = tabs.find((t) => t.id === activeTabId) ?? null;
+  const activeTab = tabs.find((tab) => tab.id === activeTabId) ?? null;
+  const t = useT();
+  const agentLabelMode = useProjectSettingsStore((s) => s.settings.agentLabelMode);
   const { loadSettings: loadEditorSettings } = useEditorStore.getState();
   const { loadSettings: loadProjectSettings } = useProjectSettingsStore.getState();
   const { loadSettings: loadTerminalSettings } = useTerminalSettingsStore.getState();
@@ -192,20 +202,28 @@ export default function AppShell() {
     getUsername().then((name) => useUIStore.getState().setUsername(name));
     getComputerName().then((name) => useUIStore.getState().setComputerName(name));
 
-    // Check for updates after startup settles
-    const updateTimer = window.setTimeout(async () => {
-      await useUpdateStore.getState().checkForUpdate();
-      const { status, availableVersion } = useUpdateStore.getState();
-      if (status === "available" && availableVersion) {
-        pushNotice(
-          { tone: "info", title: "Update available", message: `Version ${availableVersion} is ready to download` },
-          { durationMs: 8000 },
-        );
-      }
-    }, 3000);
+    // Reveal the window only once the UI has actually painted. Two frames:
+    // the first schedules after this commit's layout, the second runs after
+    // it has been drawn — so the window appears with content rather than as
+    // an empty frame. The Rust side reveals it regardless after a few seconds.
+    const revealFrame = requestAnimationFrame(() => {
+      requestAnimationFrame(() => {
+        void showMainWindow().catch(() => {
+          // Already visible, or the fail-safe beat us to it.
+        });
+      });
+    });
+
+    // Record which conversations are open so they can be offered for resume
+    // after a restart.
+    const unwatchSessions = watchSessionsForRestore((listener) =>
+      useTerminalStore.subscribe((state) => listener(state.projectState)),
+    );
+
     return () => {
-      window.clearTimeout(updateTimer);
       window.clearTimeout(usageRefreshTimer);
+      cancelAnimationFrame(revealFrame);
+      unwatchSessions();
     };
   }, [fetchRepos, fetchGroups, loadEditorSettings, loadProjectSettings, loadTerminalSettings, loadUsageSettings, fetchUsageSnapshots, pushNotice]);
 
@@ -395,6 +413,8 @@ export default function AppShell() {
     }
 
     const store = useTerminalStore.getState();
+    // Selecting a detached session brings it back into the tab bar.
+    store.attachTab(tabId);
     store.setActiveTab(tabId);
     const tab = store.projectState[repoPath]?.tabs.find((entry) => entry.id === tabId);
     if (tab && (tab.kind === "terminal" || tab.kind === "assistant")) {
@@ -402,6 +422,9 @@ export default function AppShell() {
     }
   }, [activeRepoPath, handleSelectRepo]);
 
+  // Closing from the tab bar only stops you watching a session — the PTY keeps
+  // running and stays listed under its project. Ending it for real is done
+  // from the sidebar, which asks first.
   const handleCloseTab = useCallback((tabId: string) => {
     const store = useTerminalStore.getState();
     const path = store.activeProjectPath;
@@ -409,11 +432,39 @@ export default function AppShell() {
     const tab = store.projectState[path]?.tabs.find((t) => t.id === tabId);
     if (!tab) return;
     if (tab.kind === "terminal" || tab.kind === "assistant") {
-      closeTab(tabId);
+      store.detachTab(tabId);
     } else {
       store.removeTab(tabId);
     }
-  }, [closeTab]);
+  }, []);
+
+  // Ending a session for real — asks first, because output that hasn't been
+  // read is lost with the PTY.
+  const handleCloseSession = useCallback(
+    async (repoPath: string, tabId: string) => {
+      const store = useTerminalStore.getState();
+      const tab = store.projectState[repoPath]?.tabs.find((t) => t.id === tabId);
+      if (!tab || (tab.kind !== "terminal" && tab.kind !== "assistant")) return;
+
+      const language = useLanguageStore.getState().language;
+      const tr = (key: TranslationKey, vars?: Record<string, string | number>) =>
+        translate(key, language, vars);
+      const confirmed = await ask(tr("session.closeConfirm", { name: tab.label }), {
+        title: tr("session.closeTitle"),
+        kind: "warning",
+        okLabel: tr("common.close"),
+        cancelLabel: tr("common.cancel"),
+      });
+      if (!confirmed) return;
+
+      // closeTab acts on the active project, so switch first if needed.
+      if (repoPath !== useTerminalStore.getState().activeProjectPath) {
+        await handleSelectRepo(repoPath);
+      }
+      await closeTab(tabId);
+    },
+    [closeTab, handleSelectRepo],
+  );
 
   const handleNewAssistant = useCallback(() => {
     useTerminalStore.getState().addPanelTab("launcher");
@@ -435,7 +486,7 @@ export default function AppShell() {
   );
 
   const handleResumeSession = useCallback(
-    async (session: SessionHistoryEntry) => {
+    async (session: SessionHistoryEntry, preferredMode?: SessionMode | null) => {
       const terminalStore = useTerminalStore.getState();
       const existingTab = terminalStore.projectState[session.projectPath]?.tabs.find(
         (tab): tab is TerminalTabData =>
@@ -467,13 +518,28 @@ export default function AppShell() {
       }
 
       const { cols, rows } = getTerminalDimensions();
-      const ptyId = await resumeAssistant(session, cols, rows);
+      const ptyId = await resumeAssistant(session, cols, rows, preferredMode);
       if (!ptyId) return false;
       useUIStore.getState().deactivateAllOverlays();
       return true;
     },
     [getTerminalDimensions, handleSelectRepo, pushNotice, resumeAssistant],
   );
+
+  const handleResumeRestorable = useCallback(
+    async (session: RestorableSession) => {
+      const resumed = await handleResumeSession(toHistoryEntry(session), session.mode);
+      // Keep the row on failure so the conversation isn't silently lost.
+      if (resumed) {
+        useSessionRestoreStore.getState().forget(session.projectPath, session.sessionId);
+      }
+    },
+    [handleResumeSession],
+  );
+
+  const handleForgetRestorable = useCallback((session: RestorableSession) => {
+    useSessionRestoreStore.getState().forget(session.projectPath, session.sessionId);
+  }, []);
 
   const handleNewShell = useCallback(() => {
     useUIStore.getState().deactivateAllOverlays();
@@ -487,9 +553,27 @@ export default function AppShell() {
 
     const store = useTerminalStore.getState();
     switch (action) {
-      case "assistant":
-        store.addPanelTab("launcher");
+      case "assistant": {
+        // With a default assistant configured, skip the picker entirely.
+        const settings = useProjectSettingsStore.getState().settings;
+        const defaultAssistant = settings.defaultAssistant;
+        if (defaultAssistant && CODING_ASSISTANTS.some((a) => a.id === defaultAssistant)) {
+          useUIStore.getState().deactivateAllOverlays();
+          const { cols, rows } = getTerminalDimensions();
+          // Pass the target explicitly — we only just switched to it.
+          await launchAssistant(
+            defaultAssistant,
+            cols,
+            rows,
+            settings.defaultAgentMode,
+            undefined,
+            repoPath,
+          );
+        } else {
+          store.addPanelTab("launcher");
+        }
         break;
+      }
       case "terminal": {
         useUIStore.getState().deactivateAllOverlays();
         const { cols, rows } = getTerminalDimensions();
@@ -506,7 +590,7 @@ export default function AppShell() {
         store.addPanelTab("todos");
         break;
     }
-  }, [getTerminalDimensions, handleSelectRepo, spawnBlankShell]);
+  }, [getTerminalDimensions, handleSelectRepo, spawnBlankShell, launchAssistant]);
 
   const handleActiveProjectAction = useCallback((action: ProjectActionKind) => {
     const repoPath = useTerminalStore.getState().activeProjectPath;
@@ -659,25 +743,26 @@ export default function AppShell() {
         case "settings":
           useUIStore.getState().toggleSettings();
           break;
-        case "check_updates":
-          void useUpdateStore.getState().checkForUpdate().then(() => {
-            const { status, availableVersion } = useUpdateStore.getState();
-            if (status === "available" && availableVersion) {
-              pushNotice(
-                { tone: "info", title: "Update available", message: `Version ${availableVersion} is ready to download` },
-                { durationMs: 8000 },
-              );
-            } else if (status === "idle") {
-              pushNotice({ tone: "success", title: "You're up to date", message: "No updates available" });
-            }
-          });
-          break;
       }
     });
     return () => { unlisten.then((f) => f()); };
   }, [handleNewShell, handleNewAssistant, handleOpenInEditor, pushNotice]);
 
   const showOverlay = settingsActive || usagePanelActive || portsPanelActive || historyPanelActive;
+
+  // Titlebar shows where you are: project, then the session inside it. An open
+  // overlay is what you're actually looking at, so the session name drops out.
+  const headerProjectName = activeRepoPath
+    ? activeRepoPath.split("/").filter(Boolean).pop() ?? activeRepoPath
+    : null;
+  const headerActiveTab = showOverlay ? null : activeTab;
+  const headerSessionName = !headerActiveTab
+    ? null
+    : headerActiveTab.kind === "assistant"
+      ? agentDisplayLabel(headerActiveTab, agentLabelMode, headerProjectName ?? undefined).text
+      : headerActiveTab.kind === "terminal"
+        ? headerActiveTab.label
+        : t(tabKindMeta[headerActiveTab.kind].labelKey);
 
   return (
     <div className="app-shell">
@@ -695,6 +780,17 @@ export default function AppShell() {
           }
         }}
       >
+        {headerProjectName && (
+          <span className="drag-region__title">
+            <span className="drag-region__title-project truncate">{headerProjectName}</span>
+            {headerSessionName && (
+              <>
+                <span className="drag-region__title-sep">/</span>
+                <span className="drag-region__title-session truncate">{headerSessionName}</span>
+              </>
+            )}
+          </span>
+        )}
         <div className="absolute right-4 top-1/2 -translate-y-1/2 flex items-center gap-0.5 z-20">
           <button
             onClick={(e) => { e.stopPropagation(); useUIStore.getState().toggleSidebar(); }}
@@ -704,15 +800,6 @@ export default function AppShell() {
             aria-label={sidebarVisible ? "Hide sidebar" : "Show sidebar"}
           >
             <PanelLeft size={20} />
-          </button>
-          <button
-            onClick={(e) => { e.stopPropagation(); useUIStore.getState().toggleDiffPanel(); }}
-            onMouseDown={(e) => e.stopPropagation()}
-            className={`p-1 rounded transition-opacity hover:opacity-70 ${diffPanelVisible ? "opacity-40" : "opacity-15"}`}
-            title={diffPanelVisible ? "Hide diff panel" : "Show diff panel"}
-            aria-label={diffPanelVisible ? "Hide diff panel" : "Show diff panel"}
-          >
-            <PanelRight size={20} />
           </button>
         </div>
       </div>
@@ -730,6 +817,9 @@ export default function AppShell() {
             onOpenInEditor={handleOpenInEditor}
             onProjectAction={handleProjectAction}
             onSelectProjectTab={handleSelectSidebarProjectTab}
+            onCloseProjectTab={handleCloseSession}
+            onResumeProjectSession={handleResumeRestorable}
+            onForgetProjectSession={handleForgetRestorable}
             onRenameGroup={handleRenameGroup}
             onDeleteGroup={handleDeleteGroup}
             onMoveToGroup={handleMoveToGroup}
@@ -828,12 +918,6 @@ export default function AppShell() {
             ))}
           </div>
         </div>
-
-        {diffPanelVisible && (
-          <Suspense fallback={null}>
-            <DiffSummaryPanel />
-          </Suspense>
-        )}
       </div>
     </div>
   );

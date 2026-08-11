@@ -13,6 +13,8 @@ import {
   SquareArrowOutUpRight,
   Sparkles,
   Check,
+  ChevronRight,
+  ChevronDown,
 } from "lucide-react";
 import { createPortal } from "react-dom";
 import ContextMenu from "../shared/ContextMenu";
@@ -22,6 +24,8 @@ import { useSkillStore } from "../../stores/useSkillStore";
 import { getErrorMessage } from "../../lib/errors";
 import { handleActionKey } from "../../lib/a11y";
 import { gitCreateWorktree, revealInFinder } from "../../lib/tauri";
+import ProjectActionMenu, { type ProjectActionKind } from "../shared/ProjectActionMenu";
+import { useT } from "../../stores/useLanguageStore";
 
 const EMPTY_SKILLS: never[] = [];
 
@@ -32,6 +36,8 @@ interface ProjectItemProps {
   worktreeParent?: string | null;
   groups: RepoGroup[];
   onClick: () => void;
+  onToggleExpand: () => void;
+  onProjectAction: (action: ProjectActionKind) => void;
   onRemove: () => void;
   onOpenInEditor: () => void;
   onAddProject: (repoPath: string) => Promise<void>;
@@ -46,20 +52,23 @@ export default function ProjectItem({
   worktreeParent,
   groups,
   onClick,
+  onToggleExpand,
+  onProjectAction,
   onRemove,
   onOpenInEditor,
   onAddProject,
   onMoveToGroup,
   onNewGroupForRepo,
 }: ProjectItemProps) {
+  const t = useT();
   const [menu, setMenu] = useState<{ x: number; y: number } | null>(null);
   const skills = useSkillStore((s) => s.skillsByRepo[repo.path] ?? EMPTY_SKILLS);
   const preferredEditor = useEditorStore((s) => s.settings.preferredEditor);
   const pushNotice = useNoticeStore((s) => s.pushNotice);
   const preferredEditorLabel = getEditorLabel(preferredEditor);
   const editorActionLabel = preferredEditorLabel
-    ? `Open in ${preferredEditorLabel}`
-    : "Set Editor Preference";
+    ? t("project.openInEditor", { editor: preferredEditorLabel })
+    : t("project.setEditorPreference");
 
   const [wtCreate, setWtCreate] = useState<{ x: number; y: number } | null>(null);
   const [wtBranchName, setWtBranchName] = useState("");
@@ -147,14 +156,14 @@ export default function ProjectItem({
     })),
     ...(otherGroups.length > 0 || repo.group ? [{ separator: true, label: "_sep_new" }] : []),
     {
-      label: "New Group",
+      label: t("project.newGroup"),
       onClick: () => onNewGroupForRepo(repo.path),
     },
     ...(repo.group
       ? [
           { separator: true, label: "_sep_remove" },
           {
-            label: "Remove from group",
+            label: t("project.removeFromGroup"),
             onClick: () => onMoveToGroup(repo.path, null),
           },
         ]
@@ -187,7 +196,7 @@ export default function ProjectItem({
       onClick: onOpenInEditor,
     },
     {
-      label: "Open in Finder",
+      label: t("project.openInFinder"),
       icon: <FolderOpen size={14} />,
       onClick: () => {
         revealInFinder(repo.path)
@@ -201,7 +210,7 @@ export default function ProjectItem({
       },
     },
     {
-      label: "Copy Path",
+      label: t("project.copyPath"),
       icon: <Copy size={14} />,
       onClick: () => {
         navigator.clipboard.writeText(repo.path)
@@ -222,26 +231,26 @@ export default function ProjectItem({
       },
     },
     {
-      label: "Move to",
+      label: t("project.moveTo"),
       icon: <FolderInput size={14} />,
       children: moveToChildren,
     },
     ...(skillChildren.length > 0
       ? [
           {
-            label: "Agent Skills",
+            label: t("project.agentSkills"),
             icon: <Sparkles size={14} />,
             children: skillChildren,
           },
         ]
       : []),
     {
-      label: "Create Worktree",
+      label: t("project.createWorktree"),
       icon: <Plus size={14} />,
       onClick: handleOpenCreateWorktree,
     },
     {
-      label: "Remove Project",
+      label: t("project.remove"),
       icon: <Trash2 size={14} />,
       danger: true,
       onClick: onRemove,
@@ -251,7 +260,7 @@ export default function ProjectItem({
   return (
     <>
       <div
-        className={`list-item ${isActive ? "project-active" : ""}`}
+        className={`list-item project-row ${isActive ? "project-active" : ""}`}
         onClick={onClick}
         onContextMenu={handleContextMenu}
         onKeyDown={(event) => handleActionKey(event, onClick)}
@@ -261,15 +270,34 @@ export default function ProjectItem({
         aria-expanded={isExpanded}
         aria-label={repo.name}
       >
+        <button
+          type="button"
+          className="project-row__chevron"
+          // Expanding is separate from selecting so you can peek at another
+          // project's sessions without switching to it.
+          onClick={(event) => {
+            event.stopPropagation();
+            onToggleExpand();
+          }}
+          onMouseDown={(event) => event.stopPropagation()}
+          tabIndex={-1}
+          aria-hidden="true"
+        >
+          {isExpanded ? <ChevronDown size={13} /> : <ChevronRight size={13} />}
+        </button>
         {worktreeParent ? (
-          <GitFork size={14} className="shrink-0" style={{ opacity: 0.6 }} />
+          <GitFork size={15} className="shrink-0" style={{ opacity: 0.6 }} />
         ) : (
-          isExpanded ? <FolderOpen size={14} /> : <Folder size={14} />
+          isExpanded ? <FolderOpen size={15} className="shrink-0" /> : <Folder size={15} className="shrink-0" />
         )}
-        <span className="truncate font-medium">
-          {worktreeParent ? `${worktreeParent} > ${repo.name}` : repo.name}
+        <span className="project-row__name truncate">
+          {worktreeParent ? `${worktreeParent} › ${repo.name}` : repo.name}
         </span>
-        <span className="flex-1" />
+        <ProjectActionMenu
+          variant="icon"
+          projectName={repo.name}
+          onAction={onProjectAction}
+        />
       </div>
       {menu && createPortal(
         <ContextMenu
@@ -287,7 +315,7 @@ export default function ProjectItem({
           style={{ left: wtCreate.x, top: wtCreate.y, minWidth: 280 }}
         >
           <div style={{ padding: "6px 10px 2px", fontSize: 11, opacity: 0.5 }}>
-            Create worktree
+            {t("project.createWorktree")}
           </div>
           <form
             className="branch-dropdown__create-form"
@@ -312,7 +340,7 @@ export default function ProjectItem({
             />
           </form>
           <div style={{ padding: "0 10px 8px", fontSize: 11, opacity: 0.5, lineHeight: 1.4 }}>
-            Creates a new branch and worktree under
+            {t("project.worktreeBranchHint")}
             <div style={{ marginTop: 4, opacity: 0.8, wordBreak: "break-all" }}>
               {createPathPreview ?? `.shep-worktrees/${repo.name}/...`}
             </div>
@@ -324,7 +352,7 @@ export default function ProjectItem({
               disabled={!wtBranchName.trim() || creatingWorktree}
               onClick={() => void handleCreateWorktree()}
             >
-              {creatingWorktree ? "Creating..." : "Create Worktree"}
+              {creatingWorktree ? t("project.creating") : t("project.createWorktree")}
             </button>
           </div>
         </div>,

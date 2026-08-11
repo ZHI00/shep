@@ -1,20 +1,32 @@
 import { useEffect, useMemo, useState, useCallback, useRef } from "react";
-import type { RepoInfo, RepoGroup } from "../../lib/types";
-import { open } from "@tauri-apps/plugin-dialog";
+import type { RepoInfo, RepoGroup, TerminalTabData } from "../../lib/types";
 import { useGitStore } from "../../stores/useGitStore";
 import { useRepoStore } from "../../stores/useRepoStore";
 import { useNoticeStore } from "../../stores/useNoticeStore";
 import { getErrorMessage } from "../../lib/errors";
 import ProjectItem from "./ProjectItem";
 import GroupHeader from "./GroupHeader";
-import GitStatusRow from "./GitStatusRow";
-import ProjectActionMenu, { type ProjectActionKind } from "../shared/ProjectActionMenu";
+import ProjectSessionRow from "./ProjectSessionRow";
+import RestorableSessionRow from "./RestorableSessionRow";
+import { type ProjectActionKind } from "../shared/ProjectActionMenu";
+import { useT } from "../../stores/useLanguageStore";
+import type { RestorableSession } from "../../stores/useSessionRestoreStore";
+
+const EMPTY_SESSIONS: TerminalTabData[] = [];
+const EMPTY_RESTORABLE: RestorableSession[] = [];
 
 interface ProjectListProps {
   repos: RepoInfo[];
   groups: RepoGroup[];
   activeRepoPath: string | null;
+  activeTabId: string | null;
+  sessionsByRepo: Record<string, TerminalTabData[]>;
+  restorableByRepo: Record<string, RestorableSession[]>;
   onSelectRepo: (repoPath: string) => void;
+  onSelectSession: (repoPath: string, tabId: string) => void;
+  onCloseSession: (repoPath: string, tabId: string) => void;
+  onResumeSession: (session: RestorableSession) => void;
+  onForgetSession: (session: RestorableSession) => void;
   onAddProject: (repoPath: string) => Promise<void>;
   onRemoveProject: (repoPath: string) => void;
   onOpenInEditor: (repoPath: string) => void;
@@ -28,7 +40,14 @@ export default function ProjectList({
   repos,
   groups,
   activeRepoPath,
+  activeTabId,
+  sessionsByRepo,
+  restorableByRepo,
   onSelectRepo,
+  onSelectSession,
+  onCloseSession,
+  onResumeSession,
+  onForgetSession,
   onAddProject,
   onRemoveProject,
   onOpenInEditor,
@@ -37,6 +56,7 @@ export default function ProjectList({
   onDeleteGroup,
   onMoveToGroup,
 }: ProjectListProps) {
+  const t = useT();
   const [expandedPaths, setExpandedPaths] = useState<Set<string>>(
     () => new Set(activeRepoPath ? [activeRepoPath] : []),
   );
@@ -90,6 +110,15 @@ export default function ProjectList({
     }
   };
 
+  const handleToggleExpand = useCallback((repoPath: string) => {
+    setExpandedPaths((prev) => {
+      const next = new Set(prev);
+      if (next.has(repoPath)) next.delete(repoPath);
+      else next.add(repoPath);
+      return next;
+    });
+  }, []);
+
   const handleToggleGroup = useCallback((groupId: string) => {
     setExpandedGroups((prev) => {
       const next = new Set(prev);
@@ -98,17 +127,6 @@ export default function ProjectList({
       return next;
     });
   }, []);
-
-  const handleAddClick = async () => {
-    const selected = await open({
-      directory: true,
-      multiple: false,
-      title: "Select project folder",
-    });
-    if (selected) {
-      onAddProject(selected);
-    }
-  };
 
   const handleCreateGroupSubmit = useCallback(() => {
     if (createGroupSubmittedRef.current) return;
@@ -174,10 +192,15 @@ export default function ProjectList({
 
   const renderRepoItem = (repo: RepoInfo) => {
     const isActive = repo.path === activeRepoPath;
-    const isExpanded = isActive && expandedPaths.has(repo.path);
+    // Expansion no longer requires the project to be selected — you can open
+    // any project to see its sessions without switching to it.
+    const isExpanded = expandedPaths.has(repo.path);
     const worktreeParent = gitStatuses[repo.path]?.worktree_parent ?? null;
+    const sessions = sessionsByRepo[repo.path] ?? EMPTY_SESSIONS;
+    const restorable = restorableByRepo[repo.path] ?? EMPTY_RESTORABLE;
+    const hasRows = sessions.length > 0 || restorable.length > 0;
     return (
-      <div key={repo.path}>
+      <div key={repo.path} className={`project-node${isExpanded ? " project-node--expanded" : ""}`}>
         <ProjectItem
           repo={repo}
           isActive={isActive}
@@ -187,6 +210,8 @@ export default function ProjectList({
           onOpenInEditor={() => onOpenInEditor(repo.path)}
           onRemove={() => onRemoveProject(repo.path)}
           onClick={() => handleProjectClick(repo.path)}
+          onToggleExpand={() => handleToggleExpand(repo.path)}
+          onProjectAction={(action) => onProjectAction(repo.path, action)}
           onAddProject={onAddProject}
           onMoveToGroup={onMoveToGroup}
           onNewGroupForRepo={(repoPath) => {
@@ -195,14 +220,26 @@ export default function ProjectList({
             setCreatingGroup(true);
           }}
         />
-        {isExpanded && (
-          <div className="mt-1 mb-2 flex flex-col gap-0.5 pl-2">
-            <ProjectActionMenu
-              variant="project"
-              projectName={repo.name}
-              onAction={(action) => onProjectAction(repo.path, action)}
-            />
-            <GitStatusRow repoPath={repo.path} />
+        {/* Sessions only — the branch lives in the top-right header. */}
+        {isExpanded && hasRows && (
+          <div className="project-node__body">
+            {sessions.map((tab) => (
+              <ProjectSessionRow
+                key={tab.id}
+                tab={tab}
+                isActive={repo.path === activeRepoPath && tab.id === activeTabId}
+                onSelect={() => onSelectSession(repo.path, tab.id)}
+                onClose={() => onCloseSession(repo.path, tab.id)}
+              />
+            ))}
+            {restorable.map((session) => (
+              <RestorableSessionRow
+                key={`restore:${session.sessionId}`}
+                session={session}
+                onResume={() => onResumeSession(session)}
+                onForget={() => onForgetSession(session)}
+              />
+            ))}
           </div>
         )}
       </div>
@@ -226,7 +263,7 @@ export default function ProjectList({
             {isGroupExpanded && (
               <div className="pl-4">
                 {groupRepos.length === 0 ? (
-                  <div className="group-empty-hint">No projects in this group</div>
+                  <div className="group-empty-hint">{t("sidebar.noProjectsInGroup")}</div>
                 ) : (
                   groupRepos.map(renderRepoItem)
                 )}
@@ -238,10 +275,6 @@ export default function ProjectList({
 
       {ungroupedRepos.map(renderRepoItem)}
 
-      <button className="btn-ghost w-full mt-1" onClick={handleAddClick}>
-        <span>+</span>
-        <span>Add Project</span>
-      </button>
       {creatingGroup && (
         <form
           className="group-create-form"
@@ -253,7 +286,7 @@ export default function ProjectList({
           <input
             className="group-create-form__input"
             type="text"
-            placeholder="Group name"
+            placeholder={t("sidebar.groupName")}
             autoFocus
             value={newGroupName}
             onChange={(e) => setNewGroupName(e.target.value)}

@@ -2,11 +2,13 @@ import { useEffect, useRef, useState } from "react";
 import { createPortal } from "react-dom";
 import { Plus } from "lucide-react";
 import tabKindMeta from "../../lib/tabKindMeta";
+import { useT } from "../../stores/useLanguageStore";
 
 export type ProjectActionKind = "assistant" | "terminal" | "commands" | "git" | "todos";
 
 interface ProjectActionMenuProps {
-  variant: "tab" | "project";
+  /** "icon" is the compact trigger used inside a project row. */
+  variant: "tab" | "project" | "icon";
   onAction: (action: ProjectActionKind) => void;
   projectName?: string;
 }
@@ -18,6 +20,7 @@ export default function ProjectActionMenu({
   onAction,
   projectName,
 }: ProjectActionMenuProps) {
+  const t = useT();
   const [open, setOpen] = useState(false);
   const [position, setPosition] = useState({ top: 0, left: 0 });
   const buttonRef = useRef<HTMLButtonElement>(null);
@@ -64,10 +67,14 @@ export default function ProjectActionMenu({
     setOpen((value) => !value);
   };
 
-  const label = projectName ? `Add to ${projectName}` : "Add project tab";
+  const label = projectName
+    ? t("project.addTo", { name: projectName })
+    : t("project.addTab");
   const buttonClass = variant === "tab"
     ? "tab tab-auto !px-3 font-semibold"
-    : "section-toggle project-new-tab";
+    : variant === "icon"
+      ? "project-row__add"
+      : "section-toggle project-new-tab";
 
   return (
     <>
@@ -82,12 +89,14 @@ export default function ProjectActionMenu({
         aria-haspopup="menu"
         aria-expanded={open}
       >
-        {variant === "tab" ? "+" : (
+        {variant === "tab" && "+"}
+        {variant === "icon" && <Plus size={14} />}
+        {variant === "project" && (
           <>
             <span className="shrink-0 w-[14px] flex items-center justify-center">
               <Plus size={14} />
             </span>
-            <span className="truncate">New Tab</span>
+            <span className="truncate">{t("project.newTab")}</span>
           </>
         )}
       </button>
@@ -113,7 +122,7 @@ export default function ProjectActionMenu({
                 }}
               >
                 <span className="context-menu__icon">{meta.icon(14)}</span>
-                <span>{meta.label}</span>
+                <span>{t(meta.labelKey)}</span>
                 {meta.shortcut && <span className="context-menu__shortcut">{meta.shortcut}</span>}
               </button>
             );

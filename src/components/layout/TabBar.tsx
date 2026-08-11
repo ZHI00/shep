@@ -1,5 +1,5 @@
 import { useCallback, useRef, useState } from "react";
-import { useTerminalStore } from "../../stores/useTerminalStore";
+import { isTabDetached, useTerminalStore } from "../../stores/useTerminalStore";
 import { useUIStore } from "../../stores/useUIStore";
 import { useShallow } from "zustand/shallow";
 import { GitBranch } from "lucide-react";
@@ -7,6 +7,7 @@ import { assistantLogoSrc, getAssistantLogoClass } from "../../lib/assistantLogo
 import { handleActionKey } from "../../lib/a11y";
 import { useGitStore } from "../../stores/useGitStore";
 import tabKindMeta from "../../lib/tabKindMeta";
+import { useT } from "../../stores/useLanguageStore";
 import type { UnifiedTab } from "../../lib/types";
 import { useProjectSettingsStore } from "../../stores/useProjectSettingsStore";
 import { agentDisplayLabel } from "../../lib/agentLabels";
@@ -39,6 +40,7 @@ export default function TabBar({
   const projectTerminals = projectState;
   const projectName = activeProjectPath ? activeProjectPath.split("/").pop() : null;
   const agentLabelMode = useProjectSettingsStore((s) => s.settings.agentLabelMode);
+  const t = useT();
   const gitStatus = useGitStore((s) => activeProjectPath ? s.projectGitStatus[activeProjectPath] : null);
   const branch = gitStatus?.branch ?? null;
   const branchIconColor = !gitStatus || !gitStatus.is_git_repo
@@ -46,7 +48,8 @@ export default function TabBar({
     : gitStatus.dirty
       ? "var(--status-attention)"
       : "var(--status-clean)";
-  const tabs = projectTerminals?.tabs ?? [];
+  // Detached sessions keep running but are only reachable from the sidebar.
+  const tabs = (projectTerminals?.tabs ?? []).filter((tab) => !isTabDetached(tab));
   const activeTabId = projectTerminals?.activeTabId ?? null;
   const { setActiveTab, reorderTab, updateTab } = useTerminalStore.getState();
 
@@ -119,6 +122,7 @@ export default function TabBar({
 
   const anyOverlay = settingsActive || usagePanelActive || portsPanelActive || historyPanelActive;
 
+
   const handleSelectTab = (tabId: string) => {
     useUIStore.getState().deactivateAllOverlays();
     setActiveTab(tabId);
@@ -141,9 +145,13 @@ export default function TabBar({
         {tabs.map((tab, i) => {
           const isActive = tab.id === activeTabId && !anyOverlay;
           const isDragging = tab.id === dragTabId;
+          // Panel tabs carry a fixed English label from when they were opened;
+          // translate them at render so a language switch takes effect now.
           const displayLabel = tab.kind === "assistant"
             ? agentDisplayLabel(tab, agentLabelMode, projectName ?? undefined)
-            : { text: tab.label, isTitle: false };
+            : tab.kind === "terminal"
+              ? { text: tab.label, isTitle: false }
+              : { text: t(tabKindMeta[tab.kind].labelKey), isTitle: false };
 
           const showDropBefore = dropIndex !== null && dragTabId && tab.id !== dragTabId && dropIndex === i;
           const showDropAfter = dropIndex !== null && dragTabId && tab.id !== dragTabId && dropIndex === i + 1 && i === tabs.length - 1;
@@ -217,16 +225,15 @@ export default function TabBar({
 
         <ProjectActionMenu variant="tab" onAction={onProjectAction} />
       </div>
-      {projectName && (
+      {/* Project and session moved to the titlebar; only the branch lives here. */}
+      {branch && (
         <span className="tab-bar__breadcrumb">
-          {projectName}
-          {branch && (
-            <>
-              <span className="tab-bar__breadcrumb-on">on</span>
-              <GitBranch size={15} className="tab-bar__breadcrumb-icon" style={branchIconColor ? { color: branchIconColor } : undefined} />
-              {branch}
-            </>
-          )}
+          <GitBranch
+            size={15}
+            className="tab-bar__breadcrumb-icon"
+            style={branchIconColor ? { color: branchIconColor } : undefined}
+          />
+          <span className="truncate">{branch}</span>
         </span>
       )}
     </div>

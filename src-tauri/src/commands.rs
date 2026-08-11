@@ -542,6 +542,15 @@ pub fn get_computer_name() -> String {
         .unwrap_or_default()
 }
 
+/// Reveals the main window, which starts hidden. Called once the UI has
+/// painted its first frame so the app appears fully drawn instead of as an
+/// empty frame with traffic lights on it.
+#[tauri::command]
+pub fn show_main_window(window: tauri::Window) -> Result<(), String> {
+    window.show().map_err(|e| e.to_string())?;
+    window.set_focus().map_err(|e| e.to_string())
+}
+
 // ── Todo commands ───────────────────────────────────────────────────
 
 #[tauri::command]
@@ -865,6 +874,7 @@ fn editor_app_name(editor_id: &str) -> Option<&'static str> {
         "zed" => Some("Zed"),
         "cursor" => Some("Cursor"),
         "sublime_text" => Some("Sublime Text"),
+        "trae" => Some("Trae"),
         _ => None,
     }
 }

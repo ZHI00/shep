@@ -1,4 +1,5 @@
 import { ChevronDown, ChevronRight } from "lucide-react";
+import { useT } from "../../stores/useLanguageStore";
 
 interface SidebarSectionToggleProps {
   label: string;
@@ -13,17 +14,18 @@ export default function SidebarSectionToggle({
   badge,
   onToggle,
 }: SidebarSectionToggleProps) {
+  const t = useT();
   return (
     <button
       className="section-toggle sidebar-section-toggle"
       onClick={onToggle}
-      title={collapsed ? `Show ${label.toLowerCase()}` : `Hide ${label.toLowerCase()}`}
+      title={t(collapsed ? "sidebar.showSection" : "sidebar.hideSection", { name: label })}
       aria-expanded={!collapsed}
     >
       <span className="sidebar-section-toggle__label truncate">{label}</span>
       {badge != null && <span className="badge">{badge}</span>}
       <span className="sidebar-section-toggle__chevron shrink-0">
-        {collapsed ? <ChevronRight size={12} /> : <ChevronDown size={12} />}
+        {collapsed ? <ChevronRight size={14} /> : <ChevronDown size={14} />}
       </span>
     </button>
   );

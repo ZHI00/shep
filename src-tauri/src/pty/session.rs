@@ -490,6 +490,20 @@ fn get_all_descendants(root_pid: i32) -> Vec<i32> {
     descendants
 }
 
+/// Environment variables that identify an in-progress agent session. Kept as
+/// a list rather than a prefix match so unrelated `CLAUDE_*` settings the user
+/// exported on purpose (API keys, config paths) are left alone.
+const INHERITED_AGENT_SESSION_VARS: &[&str] = &[
+    "CLAUDECODE",
+    "CLAUDE_CODE_CHILD_SESSION",
+    "CLAUDE_CODE_SESSION_ID",
+    "CLAUDE_CODE_ENTRYPOINT",
+    "CLAUDE_CODE_MESSAGING_SOCKET",
+    "CLAUDE_PID",
+    "CLAUDE_EFFORT",
+    "AI_AGENT",
+];
+
 impl PtySession {
     pub fn spawn(
         command: &str,
@@ -527,6 +541,18 @@ impl PtySession {
             cmd.arg(command);
         }
         cmd.cwd(cwd);
+
+        // Strip markers that say "you are running inside an agent session".
+        // Shep may itself have been launched from one (an agent starting the
+        // dev server, or Shep being used to develop Shep), and a PTY inherits
+        // the whole environment. An agent that sees these treats itself as a
+        // nested child — Claude Code responds by silently disabling transcript
+        // saving, which breaks resume, session history and usage tracking.
+        // Sessions started here are top-level, so the markers are cleared.
+        // Removal happens before the caller's env so an explicit value wins.
+        for key in INHERITED_AGENT_SESSION_VARS {
+            cmd.env_remove(key);
+        }
 
         for (key, val) in &env {
             cmd.env(key, val);
