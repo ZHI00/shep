@@ -10,8 +10,10 @@ use unicode_segmentation::UnicodeSegmentation;
 use url::Url;
 
 const LAUNCH_TOLERANCE_MS: i64 = 5_000;
-const MAX_NATIVE_TITLE_CHARS: usize = 120;
-const MAX_PROMPT_TITLE_CHARS: usize = 40;
+/// Budgets are counted in Latin-character widths, not chars, so a CJK title
+/// ends up the same visual length as an English one: 60 is 30 ideographs.
+const MAX_NATIVE_TITLE_WIDTH: usize = 120;
+const MAX_PROMPT_TITLE_WIDTH: usize = 60;
 const MAX_PROMPT_TITLE_WORDS: usize = 7;
 
 #[derive(Clone, Debug, PartialEq, Eq, Serialize)]
@@ -84,13 +86,13 @@ fn column_expression(columns: &HashSet<String>, column: &str) -> String {
 }
 
 fn clean_title(value: &str) -> Option<String> {
-    truncate_at_word(value, MAX_NATIVE_TITLE_CHARS)
+    truncate_at_word(value, MAX_NATIVE_TITLE_WIDTH)
 }
 
 fn compact_generated_title(value: &str) -> Option<String> {
     let cleaned = clean_title(value)?;
-    if cleaned.chars().count() > MAX_PROMPT_TITLE_CHARS
-        || cleaned.unicode_words().count() > MAX_PROMPT_TITLE_WORDS
+    if display_width(&cleaned) > MAX_PROMPT_TITLE_WIDTH
+        || (uses_spaced_words(&cleaned) && cleaned.unicode_words().count() > MAX_PROMPT_TITLE_WORDS)
     {
         compact_prompt_title(value).or(Some(cleaned))
     } else {
@@ -98,32 +100,92 @@ fn compact_generated_title(value: &str) -> Option<String> {
     }
 }
 
+/// Ideographs and fullwidth punctuation render about twice as wide as Latin
+/// letters. Ranges follow the East Asian Wide/Fullwidth blocks.
+fn is_wide_char(ch: char) -> bool {
+    matches!(
+        u32::from(ch),
+        0x1100..=0x115F
+            | 0x2E80..=0x303E
+            | 0x3041..=0x33FF
+            | 0x3400..=0x4DBF
+            | 0x4E00..=0x9FFF
+            | 0xA000..=0xA4CF
+            | 0xAC00..=0xD7A3
+            | 0xF900..=0xFAFF
+            | 0xFE10..=0xFE19
+            | 0xFE30..=0xFE6F
+            | 0xFF00..=0xFF60
+            | 0xFFE0..=0xFFE6
+            | 0x1F300..=0x1F9FF
+            | 0x20000..=0x3FFFD
+    )
+}
+
+fn display_width(value: &str) -> usize {
+    value
+        .chars()
+        .map(|ch| if is_wide_char(ch) { 2 } else { 1 })
+        .sum()
+}
+
+/// UAX#29 treats every ideograph as its own word, so a word budget would cut a
+/// Chinese title after seven characters. Scripts written without spaces get
+/// their length from the width budget instead.
+fn uses_spaced_words(value: &str) -> bool {
+    !value.chars().any(is_wide_char)
+}
+
 fn normalize_text(value: &str) -> String {
     value.split_whitespace().collect::<Vec<_>>().join(" ")
 }
 
-fn truncate_at_word(value: &str, max_chars: usize) -> Option<String> {
+fn truncate_at_word(value: &str, max_width: usize) -> Option<String> {
     let normalized = normalize_text(value);
     if normalized.is_empty() {
         return None;
     }
-    if normalized.chars().count() <= max_chars {
+    if display_width(&normalized) <= max_width {
         return Some(normalized);
     }
 
     let mut title = String::new();
+    let mut width = 0;
     for part in normalized.split_word_bounds() {
-        if title.chars().count() + part.chars().count() > max_chars {
+        let part_width = display_width(part);
+        if width + part_width > max_width {
             break;
         }
         title.push_str(part);
+        width += part_width;
     }
-    let title = title.trim_end_matches(|ch: char| ch.is_whitespace() || ch.is_ascii_punctuation());
+    let title = trim_trailing_punctuation(&title);
     if title.is_empty() {
-        let title = normalized.chars().take(max_chars).collect::<String>();
+        let mut title = String::new();
+        let mut width = 0;
+        for ch in normalized.chars() {
+            let ch_width = if is_wide_char(ch) { 2 } else { 1 };
+            if width + ch_width > max_width {
+                break;
+            }
+            title.push(ch);
+            width += ch_width;
+        }
         return (!title.is_empty()).then(|| format!("{title}…"));
     }
     Some(format!("{title}…"))
+}
+
+fn trim_trailing_punctuation(value: &str) -> &str {
+    value.trim_end_matches(|ch: char| {
+        ch.is_whitespace()
+            || ch.is_ascii_punctuation()
+            || matches!(
+                ch,
+                '，' | '。' | '、' | '；' | '：' | '！' | '？' | '（' | '）' | '「' | '」'
+                    | '《' | '》' | '“' | '”' | '‘' | '’' | '—' | '…' | '·'
+            )
+    })
 }
 
 fn strip_leading_filler(mut value: &str) -> &str {
@@ -246,14 +308,18 @@ fn compact_prompt_title(value: &str) -> Option<String> {
         return None;
     }
 
-    let word_end = focused
-        .unicode_word_indices()
-        .nth(MAX_PROMPT_TITLE_WORDS.saturating_sub(1))
-        .map(|(index, word)| index + word.len())
-        .unwrap_or(focused.len());
+    let word_end = if uses_spaced_words(focused) {
+        focused
+            .unicode_word_indices()
+            .nth(MAX_PROMPT_TITLE_WORDS.saturating_sub(1))
+            .map(|(index, word)| index + word.len())
+            .unwrap_or(focused.len())
+    } else {
+        focused.len()
+    };
     let word_limited = word_end < focused.len();
     let limited = trim_trailing_filler(&focused[..word_end]);
-    let title = truncate_at_word(limited, MAX_PROMPT_TITLE_CHARS)?;
+    let title = truncate_at_word(limited, MAX_PROMPT_TITLE_WIDTH)?;
     let char_limited = title.ends_with('…');
     let title = trim_trailing_filler(title.trim_end_matches('…'));
     if title.is_empty() {
@@ -967,6 +1033,7 @@ mod tests {
         path
     }
 
+
     #[test]
     fn compact_prompt_titles_fit_the_sidebar() {
         let cases = [
@@ -980,7 +1047,7 @@ mod tests {
             ),
             (
                 "Please inspect src/hooks/usePty.ts and figure out why session title polling stops after switching projects. Don't change the provider resolver.",
-                "session title polling stops…",
+                "session title polling stops after switching projects…",
             ),
             (
                 "I guess I'm confused—is this needed? I would expect sessions to stop when exiting the app. Is this more about being able to restore sessions?",
@@ -999,15 +1066,38 @@ mod tests {
         for (prompt, expected) in cases {
             let title = compact_prompt_title(prompt).unwrap();
             assert_eq!(title, expected);
-            assert!(title.chars().count() <= MAX_PROMPT_TITLE_CHARS + 1);
+            assert!(display_width(&title) <= MAX_PROMPT_TITLE_WIDTH + 1);
             assert!(title.unicode_words().count() <= MAX_PROMPT_TITLE_WORDS);
         }
 
-        let long_identifier = "x".repeat(MAX_PROMPT_TITLE_CHARS + 10);
+        let long_identifier = "x".repeat(MAX_PROMPT_TITLE_WIDTH + 10);
         assert_eq!(
             compact_prompt_title(&long_identifier).unwrap(),
-            format!("{}…", "x".repeat(MAX_PROMPT_TITLE_CHARS))
+            format!("{}…", "x".repeat(MAX_PROMPT_TITLE_WIDTH))
         );
+    }
+
+    /// UAX#29 counts each ideograph as a word, so the word budget alone would
+    /// cut a Chinese title to seven characters.
+    #[test]
+    fn cjk_prompt_titles_use_the_width_budget() {
+        let cases = [
+            (
+                "关闭程序再打开设置面板时，语言选择会被重置为英文，请修复这个问题",
+                "关闭程序再打开设置面板时，语言选择会被重置为英文，请修复这个…",
+            ),
+            ("修复终端标签页的重命名逻辑", "修复终端标签页的重命名逻辑"),
+            (
+                "把 useEffect 换成派生状态",
+                "把 useEffect 换成派生状态",
+            ),
+        ];
+
+        for (prompt, expected) in cases {
+            let title = compact_prompt_title(prompt).unwrap();
+            assert_eq!(title, expected);
+            assert!(display_width(&title) <= MAX_PROMPT_TITLE_WIDTH + 1);
+        }
     }
 
     #[test]
@@ -1057,7 +1147,7 @@ mod tests {
 
         let found =
             resolve_session_title_from_home(&home, "codex", "/repo", 10_000, None, None).unwrap();
-        assert_eq!(found.title.as_deref(), Some("session title polling stops…"));
+        assert_eq!(found.title.as_deref(), Some("session title polling stops after switching projects"));
 
         fs::remove_dir_all(home).unwrap();
     }
@@ -1084,7 +1174,7 @@ mod tests {
 
         let found =
             resolve_session_title_from_home(&home, "codex", "/repo", 10_000, None, None).unwrap();
-        assert_eq!(found.title.as_deref(), Some("session title polling stops…"));
+        assert_eq!(found.title.as_deref(), Some("session title polling stops after switching projects"));
 
         fs::remove_dir_all(home).unwrap();
     }
@@ -1322,7 +1412,7 @@ mod tests {
             None,
         )
         .unwrap();
-        assert_eq!(long.title.as_deref(), Some("session title polling stops…"));
+        assert_eq!(long.title.as_deref(), Some("session title polling stops after switching projects"));
 
         let short = resolve_session_title_from_home(
             &home,

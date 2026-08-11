@@ -29,7 +29,7 @@ import { useProjectSettingsStore } from "../stores/useProjectSettingsStore";
 import { buildShellCommandLine, extraLaunchArgs, resolveAssistant } from "../lib/assistants";
 import type { Terminal } from "@xterm/xterm";
 import { getErrorMessage } from "../lib/errors";
-import { sessionResumeArgs, sessionResumeSlashCommand } from "../lib/sessionResume";
+import { sessionResumeArgs } from "../lib/sessionResume";
 import {
   clearTerminalPipelineCounters,
   recordPendingOutput,
@@ -48,6 +48,8 @@ interface BufferedOutput {
   chunks: string[];
   length: number;
   truncatedChars: number;
+  /** Bytes of this buffer already acknowledged to the backend on arrival. */
+  acknowledgedBytes: number;
 }
 
 interface WriteQueue {
@@ -76,6 +78,35 @@ const terminalTitles = new Map<number, string>();
 const pendingOutput = new Map<number, BufferedOutput>();
 const writeQueues = new Map<number, WriteQueue>();
 const outputAckStates = new Map<number, OutputAckState>();
+/**
+ * Bytes that must not be acknowledged again when the write queue drains them:
+ * output already acknowledged on arrival while the window was hidden, plus
+ * locally injected text that never came from the PTY at all.
+ */
+const prepaidAckBytes = new Map<number, number>();
+
+/**
+ * macOS parks hidden WebViews. xterm's write loop is driven entirely by
+ * `setTimeout` — both the initial schedule and the yield after 12ms of parsing
+ * — and WebKit throttles timers to roughly once a second while the window is
+ * minimized. Because receipts are sent from the write callback, the backend's
+ * flow control (`pty/session.rs`) stalls along with the parser and the session
+ * crawls for as long as the window stays down.
+ *
+ * While hidden, output is therefore buffered instead of written, and
+ * acknowledged the moment it arrives so sessions keep running at full speed.
+ * The buffer is bounded and drops its oldest data, so coming back costs one
+ * bounded write rather than however much the session produced meanwhile.
+ */
+let windowHidden = document.visibilityState === "hidden";
+
+document.addEventListener("visibilitychange", () => {
+  const hidden = document.visibilityState === "hidden";
+  if (hidden === windowHidden) return;
+  windowHidden = hidden;
+  if (hidden) return;
+  for (const ptyId of [...pendingOutput.keys()]) flushPendingOutput(ptyId);
+});
 
 // Debounce timers for activity detection — clears "active" after 3s of silence.
 // Activity state is tracked here (not in the store) on every data event to avoid
@@ -84,6 +115,13 @@ const outputAckStates = new Map<number, OutputAckState>();
 const activityTimers = new Map<number, ReturnType<typeof setTimeout>>();
 const activityActive = new Set<number>();
 const ACTIVITY_TIMEOUT = 3000;
+/**
+ * Timestamp of the last data chunk from each PTY. Distinct from the store's
+ * `lastOutputAt`, which only moves on idle↔active transitions and is seeded at
+ * spawn time — too coarse to tell whether a process has actually printed
+ * anything yet. Kept here so it can be updated per chunk without re-rendering.
+ */
+const ptyLastOutputAt = new Map<number, number>();
 const stoppingPtys = new Set<number>();
 
 interface SessionTitleResolverState {
@@ -234,7 +272,7 @@ async function waitForShellPrompt(ptyId: number, timeoutMs = 4000): Promise<void
   while (Date.now() < deadline) {
     const activity = useTerminalStore.getState().tabActivity[ptyId];
     if (activity && !activity.alive) return;
-    if (activity?.lastOutputAt) {
+    if (ptyLastOutputAt.has(ptyId)) {
       // Let the prompt finish drawing before typing over it.
       await new Promise((resolve) => setTimeout(resolve, 120));
       return;
@@ -255,30 +293,6 @@ async function typeCommandIntoShell(ptyId: number, commandLine: string): Promise
   await writePty(ptyId, `${commandLine}\r`).catch(() => {
     // The tab still exists with a working shell — the user can retype it.
   });
-}
-
-/**
- * Waits for a launching agent to settle before typing a slash command into it.
- * Readiness is inferred from output going quiet: startup work (config, MCP
- * servers) produces a burst, and the prompt is what's left when it stops.
- * A spinner that never stops is covered by the overall timeout — sending late
- * is better than not resuming at all, since the TTY buffers the line either
- * way.
- */
-async function waitForAgentReady(
-  ptyId: number,
-  quietMs = 900,
-  timeoutMs = 15000,
-): Promise<boolean> {
-  const deadline = Date.now() + timeoutMs;
-  while (Date.now() < deadline) {
-    const activity = useTerminalStore.getState().tabActivity[ptyId];
-    if (activity && !activity.alive) return false;
-    const lastOutputAt = activity?.lastOutputAt ?? 0;
-    if (lastOutputAt > 0 && Date.now() - lastOutputAt >= quietMs) return true;
-    await new Promise((resolve) => setTimeout(resolve, 100));
-  }
-  return true;
 }
 
 function startAgentStatusObserver(
@@ -504,6 +518,7 @@ function cleanupActivityState(ptyId: number) {
   const timer = activityTimers.get(ptyId);
   if (timer) { clearTimeout(timer); activityTimers.delete(ptyId); }
   activityActive.delete(ptyId);
+  ptyLastOutputAt.delete(ptyId);
   historyActivityWrites.delete(ptyId);
   stopAgentStatusObserver(ptyId);
 }
@@ -527,7 +542,7 @@ export function recordTerminalTitle(ptyId: number, title: string) {
 }
 
 export function flushPendingOutput(ptyId: number) {
-  if (!terminalInstances.has(ptyId)) return;
+  if (!terminalInstances.has(ptyId) || windowHidden) return;
 
   const buffered = pendingOutput.get(ptyId);
   if (!buffered) return;
@@ -535,8 +550,17 @@ export function flushPendingOutput(ptyId: number) {
   pendingOutput.delete(ptyId);
   recordPendingOutput(ptyId, 0);
   if (buffered.truncatedChars > 0) {
-    enqueueTerminalOutput(ptyId, OUTPUT_TRUNCATED_MARKER);
+    enqueueLocalText(ptyId, OUTPUT_TRUNCATED_MARKER);
   }
+
+  // Buffered output was acknowledged as it arrived, so its write callbacks must
+  // not send a second receipt. Capping the credit at what actually survived the
+  // buffer's trimming keeps dropped data from eating a receipt still owed.
+  let bufferedBytes = 0;
+  for (const chunk of buffered.chunks) {
+    bufferedBytes += outputEncoder.encode(chunk).byteLength;
+  }
+  prepayAcknowledgement(ptyId, Math.min(buffered.acknowledgedBytes, bufferedBytes));
   for (const chunk of buffered.chunks) enqueueTerminalOutput(ptyId, chunk);
 }
 
@@ -548,17 +572,36 @@ export function unregisterTerminal(ptyId: number) {
   const ackState = outputAckStates.get(ptyId);
   if (ackState?.retryTimer) clearTimeout(ackState.retryTimer);
   outputAckStates.delete(ptyId);
+  prepaidAckBytes.delete(ptyId);
   clearTerminalPipelineCounters(ptyId);
 }
 
-function acknowledgeCompletedWrite(ptyId: number, chunk: string): void {
+function prepayAcknowledgement(ptyId: number, bytes: number): void {
+  if (bytes <= 0) return;
+  prepaidAckBytes.set(ptyId, (prepaidAckBytes.get(ptyId) ?? 0) + bytes);
+}
+
+function acknowledgeOutputBytes(ptyId: number, bytes: number): void {
+  if (bytes <= 0) return;
   let state = outputAckStates.get(ptyId);
   if (!state) {
     state = { pendingBytes: 0, sending: false, retryTimer: null };
     outputAckStates.set(ptyId, state);
   }
-  state.pendingBytes += outputEncoder.encode(chunk).byteLength;
+  state.pendingBytes += bytes;
   flushOutputAcknowledgement(ptyId, state);
+}
+
+function acknowledgeCompletedWrite(ptyId: number, chunk: string): void {
+  let bytes = outputEncoder.encode(chunk).byteLength;
+  const prepaid = prepaidAckBytes.get(ptyId) ?? 0;
+  if (prepaid > 0) {
+    const settled = Math.min(prepaid, bytes);
+    if (settled === prepaid) prepaidAckBytes.delete(ptyId);
+    else prepaidAckBytes.set(ptyId, prepaid - settled);
+    bytes -= settled;
+  }
+  acknowledgeOutputBytes(ptyId, bytes);
 }
 
 function flushOutputAcknowledgement(ptyId: number, state: OutputAckState): void {
@@ -659,12 +702,29 @@ function enqueueTerminalOutput(ptyId: number, data: string): void {
   drainWriteQueue(ptyId);
 }
 
+/**
+ * Queue text Shep generated itself. Its write callback must not send a receipt,
+ * because the backend never counted these bytes against the session's budget.
+ */
+function enqueueLocalText(ptyId: number, text: string): void {
+  prepayAcknowledgement(ptyId, outputEncoder.encode(text).byteLength);
+  enqueueTerminalOutput(ptyId, text);
+}
+
 function appendPendingOutput(ptyId: number, data: string): void {
   let buffer = pendingOutput.get(ptyId);
   if (!buffer) {
-    buffer = { chunks: [], length: 0, truncatedChars: 0 };
+    buffer = { chunks: [], length: 0, truncatedChars: 0, acknowledgedBytes: 0 };
     pendingOutput.set(ptyId, buffer);
   }
+
+  // Buffered output never reaches a write callback, so it is acknowledged here.
+  // Withholding the receipt leaves the backend's flow control paused at its
+  // high watermark (pty/session.rs) with the reader thread parked on a condvar,
+  // which freezes the session until the user opens the tab again.
+  const bytes = outputEncoder.encode(data).byteLength;
+  buffer.acknowledgedBytes += bytes;
+  acknowledgeOutputBytes(ptyId, bytes);
 
   buffer.chunks.push(data);
   buffer.length += data.length;
@@ -688,8 +748,11 @@ function appendPendingOutput(ptyId: number, data: string): void {
 
 function writeToPty(ptyId: number, data: string) {
   recordTerminalData(ptyId, data);
-  if (terminalInstances.has(ptyId)) enqueueTerminalOutput(ptyId, data);
-  else appendPendingOutput(ptyId, data);
+  // Only the visible tab has a mounted terminal, and a hidden window throttles
+  // xterm's timer-driven write loop to about once a second. Either way there is
+  // no write callback to acknowledge from, so the output is buffered instead.
+  if (windowHidden || !terminalInstances.has(ptyId)) appendPendingOutput(ptyId, data);
+  else enqueueTerminalOutput(ptyId, data);
 }
 
 function resolveCommandCwd(repoPath: string, commandCwd: string | null) {
@@ -720,6 +783,7 @@ export function usePty() {
     ) => {
       if (msg.event === "data") {
         writeToPty(ptyId, msg.data);
+        ptyLastOutputAt.set(ptyId, Date.now());
 
         // Only update the store on the idle→active transition, not on every chunk.
         if (!activityActive.has(ptyId)) {
@@ -1053,14 +1117,13 @@ export function usePty() {
       const assistant = resolveAssistant(session.provider, overrides);
       const mode = preferredMode ?? projectSettings.defaultAgentMode;
 
-      // Preferred route: start the agent with the user's normal launch command
-      // and resume from inside it, so no resume flag is spliced into a command
-      // they configured. Providers without a known slash command keep using
-      // the CLI flag.
-      const slashCommand = sessionResumeSlashCommand(session.provider, session.sessionId);
-      const resumeArgs = slashCommand
-        ? null
-        : sessionResumeArgs(session.provider, session.sessionId);
+      // The resume flag goes on the launch command itself. Typing it into the
+      // running agent instead would mean guessing when the agent is ready to
+      // read input, and anything sent while its runtime is still booting is
+      // silently dropped. Appending to the command is exact: the user's own
+      // command keeps its flags, and a shell alias still expands normally
+      // because the flag lands after the alias body.
+      const resumeArgs = sessionResumeArgs(session.provider, session.sessionId);
 
       const launchArgs: string[] = [...extraLaunchArgs(session.provider, overrides)];
       if (mode === "yolo" && assistant?.yoloFlag) {
@@ -1070,7 +1133,7 @@ export function usePty() {
         launchArgs.push(...resumeArgs);
       }
 
-      if (!assistant || (!slashCommand && !resumeArgs)) {
+      if (!assistant || !resumeArgs) {
         pushNotice({
           tone: "error",
           title: "Resume isn’t supported",
@@ -1094,17 +1157,7 @@ export function usePty() {
         );
         if (!ptyId) return null;
 
-        void (async () => {
-          await typeCommandIntoShell(ptyId, buildShellCommandLine(assistant.command, launchArgs));
-          if (!slashCommand) return;
-          // Wait for the agent's own prompt before typing into it — the shell
-          // prompt it replaced is long gone by then.
-          const ready = await waitForAgentReady(ptyId);
-          if (!ready) return;
-          await writePty(ptyId, `${slashCommand}\r`).catch(() => {
-            // The agent is up; the user can type /resume themselves.
-          });
-        })();
+        void typeCommandIntoShell(ptyId, buildShellCommandLine(assistant.command, launchArgs));
 
         addTab({
           id: nextTabId(),

@@ -80,8 +80,8 @@ export default function Sidebar({
     return byRepo;
   }, [projectState, tabActivity]);
 
-  // Sessions from the previous run, minus any already live again — they are
-  // listed as dormant rows and only resumed when clicked.
+  // Known sessions that aren't live right now — listed as dormant rows below
+  // the live ones and only resumed when clicked, most recent first.
   const restorableByRepo = useMemo<Record<string, RestorableSession[]>>(() => {
     const byRepo: Record<string, RestorableSession[]> = {};
     for (const [repoPath, entries] of Object.entries(restorableSessions)) {
@@ -90,7 +90,9 @@ export default function Sidebar({
           .map((tab) => tab.providerSessionId)
           .filter((id): id is string => !!id),
       );
-      const pending = entries.filter((entry) => !liveIds.has(entry.sessionId));
+      const pending = entries
+        .filter((entry) => !liveIds.has(entry.sessionId))
+        .sort((a, b) => b.savedAt - a.savedAt);
       if (pending.length > 0) byRepo[repoPath] = pending;
     }
     return byRepo;

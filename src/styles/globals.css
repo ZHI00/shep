@@ -1922,8 +1922,9 @@ select {
   align-items: center;
   gap: 5px;
   min-width: 0;
-  /* Keep clear of the traffic lights on the left and the toggle on the right. */
-  max-width: min(52%, 560px);
+  /* The title is centered, so half the budget sits on each side: at the 800px
+     minimum window this still clears the traffic lights and the toggle. */
+  max-width: min(62%, 760px);
   padding: 0 12px;
   font-size: 12px;
   font-weight: 500;
@@ -2865,6 +2866,29 @@ select {
 .terminal-surface .xterm-viewport::-webkit-scrollbar-corner,
 .git-panel__diff::-webkit-scrollbar-corner,
 .usage-heatmap__scroll::-webkit-scrollbar-corner {
+  background: transparent;
+}
+
+/* xterm v6 draws VS Code's own scrollbar rather than the browser's, so none of
+   the rules above reach the terminal — its slider arrived square and full
+   width. Only the shape is set here: the slider's width, height and offset are
+   inline styles from xterm's layout pass, and its colour comes from the theme's
+   scrollbarSlider* entries, both of which should keep winning. The 2px border
+   slims the visible slider to 6px, matching the native thumbs above, while the
+   full 10px stays clickable. `border-box` keeps that border inside the width
+   xterm assigned instead of widening the slider over the text. */
+.terminal-surface .xterm .xterm-scrollable-element > .scrollbar > .slider {
+  box-sizing: border-box;
+  border: 2px solid transparent;
+  border-radius: 999px;
+  /* Beats the `background` shorthand in xterm's injected rule, which would
+     otherwise reset the clip and paint the slider under its own border. */
+  background-clip: padding-box;
+  transition: background-color 140ms ease;
+}
+
+/* The track is only a hit area — the slider is the whole visual. */
+.terminal-surface .xterm .xterm-scrollable-element > .scrollbar {
   background: transparent;
 }
 

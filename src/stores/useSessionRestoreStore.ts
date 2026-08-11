@@ -3,7 +3,7 @@ import type { SessionHistoryEntry, SessionMode, UnifiedTab } from "../lib/types"
 import { supportsSessionResume } from "../lib/sessionResume";
 
 /**
- * A session that was open when Shep last quit. PTYs die with the app, so all
+ * A session Shep has seen open in this project. PTYs die with the app, so all
  * that survives is the provider's own session id — enough to hand back to
  * `--resume` later. Nothing is resumed at startup: these are listed alongside
  * live sessions and only started when one is actually clicked, so launching
@@ -27,7 +27,7 @@ export interface RestorableSession {
 interface SessionRestoreStore {
   /** Keyed by project path. */
   sessions: Record<string, RestorableSession[]>;
-  /** Replaces the snapshot with whatever is currently open. */
+  /** Folds whatever is currently open into the snapshot, keeping the rest. */
   capture: (projectState: Record<string, { tabs: UnifiedTab[] }>) => void;
   /** Drops one entry — called once it has been resumed into a live tab. */
   forget: (projectPath: string, sessionId: string) => void;
@@ -35,6 +35,8 @@ interface SessionRestoreStore {
 }
 
 const STORAGE_KEY = "shep.restorableSessions";
+/** Cap per project so a long-lived install doesn't grow the list forever. */
+const MAX_SESSIONS_PER_PROJECT = 20;
 
 function load(): Record<string, RestorableSession[]> {
   try {
@@ -80,28 +82,68 @@ export const useSessionRestoreStore = create<SessionRestoreStore>((set, get) => 
   sessions: load(),
 
   capture: (projectState) => {
+    // Merge rather than replace. This runs on every terminal-store change,
+    // including the `switchProject` that opening a project fires at startup —
+    // when no PTY has been spawned yet, so every tab list is empty. Replacing
+    // there would wipe the snapshot the previous run left behind, which is the
+    // only thing that makes those sessions resumable. Entries leave only via
+    // `forget`, i.e. once resumed or dismissed by hand.
+    const current = get().sessions;
     const snapshot: Record<string, RestorableSession[]> = {};
+    for (const [path, list] of Object.entries(current)) snapshot[path] = [...list];
     const savedAt = Date.now();
+    let changed = false;
 
     for (const [projectPath, project] of Object.entries(projectState)) {
-      const entries: RestorableSession[] = [];
       for (const tab of project.tabs) {
         if (tab.kind !== "assistant") continue;
         // Without a provider session id there is nothing to resume, and a
         // provider that has no resume flag can't be restarted mid-conversation.
         if (!tab.providerSessionId || !tab.assistantId) continue;
         if (!supportsSessionResume(tab.assistantId)) continue;
-        if (entries.some((entry) => entry.sessionId === tab.providerSessionId)) continue;
-        entries.push({
+
+        const entries = snapshot[projectPath] ?? [];
+        const index = entries.findIndex((entry) => entry.sessionId === tab.providerSessionId);
+        const existing = index === -1 ? null : entries[index];
+        const title = tab.label || null;
+        // Re-stamping `savedAt` on every pass would rewrite storage on every
+        // 1.5s tick, so an unchanged session is left exactly as it is.
+        if (
+          existing &&
+          existing.provider === tab.assistantId &&
+          existing.title === title &&
+          existing.mode === tab.sessionMode
+        ) {
+          continue;
+        }
+
+        const entry: RestorableSession = {
           provider: tab.assistantId,
           sessionId: tab.providerSessionId,
           projectPath,
-          title: tab.label || null,
+          title,
           mode: tab.sessionMode,
           savedAt,
-        });
+        };
+        if (index === -1) entries.push(entry);
+        else entries[index] = entry;
+        snapshot[projectPath] = entries;
+        changed = true;
       }
-      if (entries.length > 0) snapshot[projectPath] = entries;
+    }
+
+    if (!changed) return;
+
+    for (const [path, list] of Object.entries(snapshot)) {
+      if (list.length <= MAX_SESSIONS_PER_PROJECT) continue;
+      // Position breaks ties on `savedAt`: sessions recorded in the same
+      // millisecond are ordered by when they were added, so trimming drops
+      // the oldest rather than whichever the sort happened to leave last.
+      snapshot[path] = list
+        .map((entry, index) => ({ entry, index }))
+        .sort((a, b) => b.entry.savedAt - a.entry.savedAt || b.index - a.index)
+        .slice(0, MAX_SESSIONS_PER_PROJECT)
+        .map((item) => item.entry);
     }
 
     persist(snapshot);
