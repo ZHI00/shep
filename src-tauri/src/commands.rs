@@ -352,8 +352,14 @@ pub async fn get_agent_runtime_status(
     .map_err(|error| format!("Agent status resolver failed: {error}"))
 }
 
+// The session-history commands share `UsageDb.conn` with the background usage
+// ingest, which holds that mutex for a whole batch of JSONL parsing at a time.
+// They must be async: a synchronous command runs on the main thread, and the
+// main thread parking on a mutex that ingest holds for hundreds of
+// milliseconds freezes the entire window — the startup jank this fixes.
+
 #[tauri::command]
-pub fn upsert_session_history(
+pub async fn upsert_session_history(
     record: SessionHistoryUpsert,
     db: State<'_, UsageDb>,
 ) -> Result<(), String> {
@@ -361,7 +367,7 @@ pub fn upsert_session_history(
 }
 
 #[tauri::command]
-pub fn record_session_history_activity(
+pub async fn record_session_history_activity(
     provider: String,
     session_id: String,
     timestamp: i64,
@@ -372,7 +378,7 @@ pub fn record_session_history_activity(
 }
 
 #[tauri::command]
-pub fn list_session_history(
+pub async fn list_session_history(
     project_path: Option<String>,
     query: Option<String>,
     limit: Option<u32>,

@@ -29,6 +29,7 @@ interface SidebarProps {
   onCloseProjectTab: (repoPath: string, tabId: string) => void;
   onResumeProjectSession: (session: RestorableSession) => void;
   onForgetProjectSession: (session: RestorableSession) => void;
+  onCloseAllTabs: () => void;
   onRenameGroup: (groupId: string, newName: string) => void;
   onDeleteGroup: (groupId: string) => void;
   onMoveToGroup: (repoPath: string, groupId: string | null) => Promise<void>;
@@ -48,6 +49,7 @@ export default function Sidebar({
   onCloseProjectTab,
   onResumeProjectSession,
   onForgetProjectSession,
+  onCloseAllTabs,
   onRenameGroup,
   onDeleteGroup,
   onMoveToGroup,
@@ -160,7 +162,7 @@ export default function Sidebar({
         </div>
       </div>
       <SidebarUsage />
-      <SidebarFooter />
+      <SidebarFooter onCloseAllTabs={onCloseAllTabs} />
     </div>
   );
 }

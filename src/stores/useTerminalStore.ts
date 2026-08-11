@@ -17,6 +17,8 @@ interface TerminalStore {
   removeProject: (repoPath: string) => void;
   addTab: (tab: UnifiedTab) => void;
   removeTab: (id: string) => void;
+  /** Empties every project's tab list. PTY teardown is the caller's job. */
+  clearAllTabs: () => void;
   detachTab: (id: string) => void;
   attachTab: (id: string) => void;
   setActiveTab: (id: string) => void;
@@ -220,6 +222,16 @@ export const useTerminalStore = create<TerminalStore>((set, get) => ({
           [path]: { tabs, activeTabId },
         },
       };
+    });
+  },
+
+  clearAllTabs: () => {
+    set((state) => {
+      const projectState: Record<string, ProjectTerminalState> = {};
+      for (const path of Object.keys(state.projectState)) {
+        projectState[path] = emptyState();
+      }
+      return { projectState };
     });
   },
 

@@ -84,7 +84,7 @@ export default function AppShell() {
   const activeConfig = useRepoStore((s) => s.activeConfig);
   const setActiveConfig = useRepoStore((s) => s.setActiveConfig);
   const pushNotice = useNoticeStore((s) => s.pushNotice);
-  const { startCommand, stopCommand, spawnBlankShell, launchAssistant, resumeAssistant, closeTab, killProjectPtys } =
+  const { startCommand, stopCommand, spawnBlankShell, launchAssistant, resumeAssistant, closeTab, closeAllTabs, killProjectPtys } =
     usePty();
 
   const restoreAttemptedRef = useRef(false);
@@ -197,7 +197,10 @@ export default function AppShell() {
     const usageRefreshTimer = window.setTimeout(() => {
       void fetchUsageSnapshots();
     }, 3000);
-    void refreshUsageData();
+    // No refreshUsageData() here: the Rust side already starts an ingest pass
+    // at launch, and a second one would compete with it for the usage DB lock
+    // during the catch-up window — which can run long on an install with a
+    // large usage history. The 60s interval below keeps the data fresh.
     void initNotifications();
     getUsername().then((name) => useUIStore.getState().setUsername(name));
     getComputerName().then((name) => useUIStore.getState().setComputerName(name));
@@ -541,6 +544,25 @@ export default function AppShell() {
     useSessionRestoreStore.getState().forget(session.projectPath, session.sessionId);
   }, []);
 
+  const handleCloseAllTabs = useCallback(async () => {
+    const { projectState } = useTerminalStore.getState();
+    const count = Object.values(projectState).reduce(
+      (sum, project) => sum + project.tabs.length,
+      0,
+    );
+    if (count === 0) return;
+
+    const confirmed = await ask(t("sidebar.closeAllConfirm", { count }), {
+      title: t("sidebar.closeAllTitle"),
+      kind: "warning",
+      okLabel: t("sidebar.closeAll"),
+      cancelLabel: t("common.cancel"),
+    });
+    if (!confirmed) return;
+
+    await closeAllTabs();
+  }, [closeAllTabs, t]);
+
   const handleNewShell = useCallback(() => {
     useUIStore.getState().deactivateAllOverlays();
     const { cols, rows } = getTerminalDimensions();
@@ -820,6 +842,7 @@ export default function AppShell() {
             onCloseProjectTab={handleCloseSession}
             onResumeProjectSession={handleResumeRestorable}
             onForgetProjectSession={handleForgetRestorable}
+            onCloseAllTabs={handleCloseAllTabs}
             onRenameGroup={handleRenameGroup}
             onDeleteGroup={handleDeleteGroup}
             onMoveToGroup={handleMoveToGroup}

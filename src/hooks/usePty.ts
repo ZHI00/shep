@@ -12,7 +12,7 @@ import {
 } from "../lib/tauri";
 import { useThemeStore } from "../stores/useThemeStore";
 import { hexLuminance } from "../lib/themes";
-import type { AgentSemanticState, AgentStatusObservation, PtyOutput, CommandConfig, SessionHistoryEntry, SessionMode } from "../lib/types";
+import type { AgentSemanticState, AgentStatusObservation, PtyOutput, CommandConfig, SessionHistoryEntry, SessionMode, TerminalTabData } from "../lib/types";
 import {
   detectAgentScreenStatus,
   readTerminalBottomScreen,
@@ -26,6 +26,7 @@ import { useTerminalStore, nextTabId } from "../stores/useTerminalStore";
 import { useRepoStore } from "../stores/useRepoStore";
 import { useNoticeStore } from "../stores/useNoticeStore";
 import { useProjectSettingsStore } from "../stores/useProjectSettingsStore";
+import { useSessionRestoreStore } from "../stores/useSessionRestoreStore";
 import { buildShellCommandLine, extraLaunchArgs, resolveAssistant } from "../lib/assistants";
 import type { Terminal } from "@xterm/xterm";
 import { getErrorMessage } from "../lib/errors";
@@ -1237,9 +1238,59 @@ export function usePty() {
       }
 
       removeTab(tabId);
+      // An explicitly closed conversation must leave the sidebar with its tab.
+      // The restore snapshot keeps entries until told otherwise, so without
+      // this the session lingers as a dormant row that resumes on click.
+      // Kept in the same synchronous block as removeTab: the snapshot watcher
+      // is debounced, and a capture firing between the two would write the
+      // still-open tab right back.
+      if (tab.kind === "assistant" && tab.providerSessionId) {
+        useSessionRestoreStore.getState().forget(path, tab.providerSessionId);
+      }
     },
     [setCommandStatus, setCommandPtyId, removeTab, removeActivity],
   );
+
+  /**
+   * Closes every tab in every project: kills the PTYs, empties the tab lists,
+   * and drops the closed conversations from the restore snapshot. The forgets
+   * run in the same synchronous block as the tab clear — the snapshot watcher
+   * is debounced, and a capture firing in between would re-record a session
+   * whose tab is still in the store.
+   */
+  const closeAllTabs = useCallback(async () => {
+    const { projectState } = useTerminalStore.getState();
+    const closing: { path: string; tab: TerminalTabData }[] = [];
+    for (const [path, project] of Object.entries(projectState)) {
+      for (const tab of project.tabs) {
+        if (tab.kind !== "terminal" && tab.kind !== "assistant") continue;
+        closing.push({ path, tab });
+      }
+    }
+
+    for (const { tab } of closing) {
+      cleanupActivityState(tab.ptyId);
+      stopSessionTitleResolver(tab.ptyId);
+      stoppingPtys.add(tab.ptyId);
+      await killPty(tab.ptyId).catch(() => {
+        stoppingPtys.delete(tab.ptyId);
+      });
+      unregisterTerminal(tab.ptyId);
+      removeActivity(tab.ptyId);
+      await persistSessionActivity(tab.ptyId, true);
+      if (tab.commandName) {
+        setCommandStatus(tab.commandName, "stopped");
+        setCommandPtyId(tab.commandName, null);
+      }
+    }
+
+    useTerminalStore.getState().clearAllTabs();
+    for (const { path, tab } of closing) {
+      if (tab.kind === "assistant" && tab.providerSessionId) {
+        useSessionRestoreStore.getState().forget(path, tab.providerSessionId);
+      }
+    }
+  }, [removeActivity, setCommandStatus, setCommandPtyId]);
 
   const killProjectPtys = useCallback(async (repoPath: string) => {
     const state = useTerminalStore.getState();
@@ -1267,6 +1318,7 @@ export function usePty() {
     launchAssistant,
     resumeAssistant,
     closeTab,
+    closeAllTabs,
     killProjectPtys,
   };
 }

@@ -23,6 +23,9 @@ const en = {
   "sidebar.ports": "Ports",
   "sidebar.showSection": "Show {name}",
   "sidebar.hideSection": "Hide {name}",
+  "sidebar.closeAll": "Close All",
+  "sidebar.closeAllTitle": "Close All Tabs",
+  "sidebar.closeAllConfirm": "Close all {count} tabs? Running sessions will be stopped.",
 
   // ── Sessions ─────────────────────────────────────────────
   "session.fallbackName": "Session",
@@ -120,6 +123,9 @@ const zh: Record<TranslationKey, string> = {
   "sidebar.ports": "端口",
   "sidebar.showSection": "展开{name}",
   "sidebar.hideSection": "收起{name}",
+  "sidebar.closeAll": "关闭所有",
+  "sidebar.closeAllTitle": "关闭所有标签页",
+  "sidebar.closeAllConfirm": "确定关闭全部 {count} 个标签页？运行中的会话会被停止。",
 
   // ── 会话 ─────────────────────────────────────────────────
   "session.fallbackName": "会话",

@@ -168,10 +168,31 @@ pub fn get_models_for_provider(db: &UsageDb, provider: &str) -> Vec<String> {
     queries::models_for_provider(&conn, provider)
 }
 
+/// Whether an ingest loop is already running. Without this, a second caller
+/// (startup ingest + a UI-triggered refresh) runs a competing loop whose lock
+/// acquisitions land exactly in the yield gaps of the first — the DB mutex is
+/// then held back-to-back and every other locker starves for the whole catch-up.
+static INGEST_RUNNING: AtomicBool = AtomicBool::new(false);
+
 /// Run background ingestion in a loop until fully caught up.
 /// Processes a small batch per cycle and releases the DB lock between cycles
 /// so UI queries (usage snapshots, etc.) aren't starved.
+/// No-op if another ingest loop is already running — that loop will pick up
+/// whatever this call would have.
 pub fn run_background_ingest(db: &UsageDb) {
+    if INGEST_RUNNING.swap(true, Ordering::SeqCst) {
+        return;
+    }
+    // Reset on every exit path (including an ingest panic), or a poisoned flag
+    // would silently disable ingestion for the rest of the app's lifetime.
+    struct Running;
+    impl Drop for Running {
+        fn drop(&mut self) {
+            INGEST_RUNNING.store(false, Ordering::SeqCst);
+        }
+    }
+    let _running = Running;
+
     loop {
         let done = {
             let conn = db.conn.lock().unwrap();

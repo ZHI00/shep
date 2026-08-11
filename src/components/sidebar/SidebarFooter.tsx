@@ -1,9 +1,13 @@
-import { ChartNoAxesCombined, History, Radio } from "lucide-react";
+import { ChartNoAxesCombined, CircleX, History, Radio } from "lucide-react";
 import { useUIStore } from "../../stores/useUIStore";
 import GearIcon from "./icons/GearIcon";
 import { useT } from "../../stores/useLanguageStore";
 
-export default function SidebarFooter() {
+interface SidebarFooterProps {
+  onCloseAllTabs: () => void;
+}
+
+export default function SidebarFooter({ onCloseAllTabs }: SidebarFooterProps) {
   const settingsActive = useUIStore((s) => s.settingsActive);
   const usageActive = useUIStore((s) => s.usagePanelActive);
   const portsActive = useUIStore((s) => s.portsPanelActive);
@@ -46,6 +50,14 @@ export default function SidebarFooter() {
         >
           <Radio size={18} />
           <span className="text-[10px]">{t("sidebar.ports")}</span>
+        </button>
+        <button
+          onClick={onCloseAllTabs}
+          className={base}
+          aria-label={t("sidebar.closeAllTitle")}
+        >
+          <CircleX size={18} />
+          <span className="text-[10px]">{t("sidebar.closeAll")}</span>
         </button>
       </div>
     </div>
