@@ -30,6 +30,7 @@ interface SidebarProps {
   onResumeProjectSession: (session: RestorableSession) => void;
   onForgetProjectSession: (session: RestorableSession) => void;
   onCloseAllTabs: () => void;
+  onCloseProjectSessions: (repoPath: string) => void;
   onRenameGroup: (groupId: string, newName: string) => void;
   onDeleteGroup: (groupId: string) => void;
   onMoveToGroup: (repoPath: string, groupId: string | null) => Promise<void>;
@@ -50,6 +51,7 @@ export default function Sidebar({
   onResumeProjectSession,
   onForgetProjectSession,
   onCloseAllTabs,
+  onCloseProjectSessions,
   onRenameGroup,
   onDeleteGroup,
   onMoveToGroup,
@@ -152,6 +154,7 @@ export default function Sidebar({
               onForgetSession={onForgetProjectSession}
               onAddProject={onAddProject}
               onRemoveProject={onRemoveProject}
+              onCloseProjectSessions={onCloseProjectSessions}
               onOpenInEditor={onOpenInEditor}
               onProjectAction={onProjectAction}
               onRenameGroup={onRenameGroup}

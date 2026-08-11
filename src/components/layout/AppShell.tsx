@@ -84,7 +84,7 @@ export default function AppShell() {
   const activeConfig = useRepoStore((s) => s.activeConfig);
   const setActiveConfig = useRepoStore((s) => s.setActiveConfig);
   const pushNotice = useNoticeStore((s) => s.pushNotice);
-  const { startCommand, stopCommand, spawnBlankShell, launchAssistant, resumeAssistant, closeTab, closeAllTabs, killProjectPtys } =
+  const { startCommand, stopCommand, spawnBlankShell, launchAssistant, resumeAssistant, closeTab, closeAllTabs, closeProjectSessions, killProjectPtys } =
     usePty();
 
   const restoreAttemptedRef = useRef(false);
@@ -531,10 +531,18 @@ export default function AppShell() {
 
   const handleResumeRestorable = useCallback(
     async (session: RestorableSession) => {
-      const resumed = await handleResumeSession(toHistoryEntry(session), session.mode);
-      // Keep the row on failure so the conversation isn't silently lost.
-      if (resumed) {
-        useSessionRestoreStore.getState().forget(session.projectPath, session.sessionId);
+      const store = useSessionRestoreStore.getState();
+      if (!store.beginResume(session.sessionId)) return;
+      try {
+        // No forget on success: success here only means a PTY spawned, not that
+        // the provider actually resumed the conversation — `claude --resume` can
+        // still fail inside the terminal, and forgetting on spawn is how those
+        // conversations used to vanish from the sidebar. The row hides by itself
+        // while a live tab carries this session id, and is dropped for real when
+        // that tab is explicitly closed.
+        await handleResumeSession(toHistoryEntry(session), session.mode);
+      } finally {
+        useSessionRestoreStore.getState().endResume(session.sessionId);
       }
     },
     [handleResumeSession],
@@ -543,6 +551,40 @@ export default function AppShell() {
   const handleForgetRestorable = useCallback((session: RestorableSession) => {
     useSessionRestoreStore.getState().forget(session.projectPath, session.sessionId);
   }, []);
+
+  const handleCloseProjectSessions = useCallback(
+    async (repoPath: string) => {
+      const project = useTerminalStore.getState().projectState[repoPath];
+      const liveTabs = (project?.tabs ?? []).filter(
+        (tab) => tab.kind === "terminal" || tab.kind === "assistant",
+      );
+      const liveIds = new Set(
+        liveTabs
+          .map((tab) => (tab.kind === "assistant" ? tab.providerSessionId : null))
+          .filter((id): id is string => !!id),
+      );
+      const dormant = (useSessionRestoreStore.getState().sessions[repoPath] ?? []).filter(
+        (entry) => !liveIds.has(entry.sessionId),
+      );
+      const count = liveTabs.length + dormant.length;
+      if (count === 0) return;
+
+      const name = repoPath.split("/").pop() ?? repoPath;
+      const confirmed = await ask(
+        t("project.closeAllSessionsConfirm", { count, name }),
+        {
+          title: t("project.closeAllSessions"),
+          kind: "warning",
+          okLabel: t("project.closeAllSessions"),
+          cancelLabel: t("common.cancel"),
+        },
+      );
+      if (!confirmed) return;
+
+      await closeProjectSessions(repoPath);
+    },
+    [closeProjectSessions, t],
+  );
 
   const handleCloseAllTabs = useCallback(async () => {
     const { projectState } = useTerminalStore.getState();
@@ -729,6 +771,10 @@ export default function AppShell() {
           { title: "Quit Shep", kind: "warning", okLabel: "Quit", cancelLabel: "Cancel" },
         );
         if (confirmed) {
+          // The snapshot watcher is debounced by 1.5s — flush it now or a
+          // session whose id arrived just before quitting is not offered for
+          // resume next launch.
+          useSessionRestoreStore.getState().capture(useTerminalStore.getState().projectState);
           await shutdownAndQuit();
         }
       } finally {
@@ -843,6 +889,7 @@ export default function AppShell() {
             onResumeProjectSession={handleResumeRestorable}
             onForgetProjectSession={handleForgetRestorable}
             onCloseAllTabs={handleCloseAllTabs}
+            onCloseProjectSessions={handleCloseProjectSessions}
             onRenameGroup={handleRenameGroup}
             onDeleteGroup={handleDeleteGroup}
             onMoveToGroup={handleMoveToGroup}

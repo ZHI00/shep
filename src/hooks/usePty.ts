@@ -273,11 +273,13 @@ async function waitForShellPrompt(ptyId: number, timeoutMs = 4000): Promise<void
   while (Date.now() < deadline) {
     const activity = useTerminalStore.getState().tabActivity[ptyId];
     if (activity && !activity.alive) return;
-    if (ptyLastOutputAt.has(ptyId)) {
-      // Let the prompt finish drawing before typing over it.
-      await new Promise((resolve) => setTimeout(resolve, 120));
-      return;
-    }
+    // The prompt is ready when startup output has gone quiet, not when the
+    // first byte shows up — plugin-heavy shells (instant prompts, completion
+    // init) keep printing for a while, and a command typed into that window
+    // can be eaten by startup scripts. For a resume that turns
+    // `claude --resume <id>` into a fresh conversation.
+    const lastOutputAt = ptyLastOutputAt.get(ptyId);
+    if (lastOutputAt !== undefined && Date.now() - lastOutputAt >= 250) return;
     await new Promise((resolve) => setTimeout(resolve, 40));
   }
 }
@@ -1251,6 +1253,26 @@ export function usePty() {
     [setCommandStatus, setCommandPtyId, removeTab, removeActivity],
   );
 
+  /** Kills one session tab's PTY and clears its per-PTY bookkeeping. */
+  const shutdownSessionTab = useCallback(
+    async (tab: TerminalTabData) => {
+      cleanupActivityState(tab.ptyId);
+      stopSessionTitleResolver(tab.ptyId);
+      stoppingPtys.add(tab.ptyId);
+      await killPty(tab.ptyId).catch(() => {
+        stoppingPtys.delete(tab.ptyId);
+      });
+      unregisterTerminal(tab.ptyId);
+      removeActivity(tab.ptyId);
+      await persistSessionActivity(tab.ptyId, true);
+      if (tab.commandName) {
+        setCommandStatus(tab.commandName, "stopped");
+        setCommandPtyId(tab.commandName, null);
+      }
+    },
+    [removeActivity, setCommandStatus, setCommandPtyId],
+  );
+
   /**
    * Closes every tab in every project: kills the PTYs, empties the tab lists,
    * and drops the closed conversations from the restore snapshot. The forgets
@@ -1269,19 +1291,7 @@ export function usePty() {
     }
 
     for (const { tab } of closing) {
-      cleanupActivityState(tab.ptyId);
-      stopSessionTitleResolver(tab.ptyId);
-      stoppingPtys.add(tab.ptyId);
-      await killPty(tab.ptyId).catch(() => {
-        stoppingPtys.delete(tab.ptyId);
-      });
-      unregisterTerminal(tab.ptyId);
-      removeActivity(tab.ptyId);
-      await persistSessionActivity(tab.ptyId, true);
-      if (tab.commandName) {
-        setCommandStatus(tab.commandName, "stopped");
-        setCommandPtyId(tab.commandName, null);
-      }
+      await shutdownSessionTab(tab);
     }
 
     useTerminalStore.getState().clearAllTabs();
@@ -1290,7 +1300,28 @@ export function usePty() {
         useSessionRestoreStore.getState().forget(path, tab.providerSessionId);
       }
     }
-  }, [removeActivity, setCommandStatus, setCommandPtyId]);
+  }, [shutdownSessionTab]);
+
+  /**
+   * Closes every session under one project: live terminal/assistant tabs are
+   * killed and removed (panel tabs stay), and the project's whole restore
+   * snapshot is dropped so no dormant row survives either. Clear-then-forget
+   * shares closeAllTabs' ordering, and for the same reason.
+   */
+  const closeProjectSessions = useCallback(async (repoPath: string) => {
+    const project = useTerminalStore.getState().projectState[repoPath];
+    const closing = (project?.tabs ?? []).filter(
+      (tab): tab is TerminalTabData =>
+        tab.kind === "terminal" || tab.kind === "assistant",
+    );
+
+    for (const tab of closing) {
+      await shutdownSessionTab(tab);
+    }
+
+    useTerminalStore.getState().clearProjectSessionTabs(repoPath);
+    useSessionRestoreStore.getState().forgetProject(repoPath);
+  }, [shutdownSessionTab]);
 
   const killProjectPtys = useCallback(async (repoPath: string) => {
     const state = useTerminalStore.getState();
@@ -1319,6 +1350,7 @@ export function usePty() {
     resumeAssistant,
     closeTab,
     closeAllTabs,
+    closeProjectSessions,
     killProjectPtys,
   };
 }

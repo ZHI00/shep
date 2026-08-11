@@ -32,6 +32,11 @@ interface SessionRestoreStore {
   /** Drops one entry — called once it has been resumed into a live tab. */
   forget: (projectPath: string, sessionId: string) => void;
   forgetProject: (projectPath: string) => void;
+  /** Session ids with a resume in flight, so the row can show it and lock. */
+  resuming: Record<string, true>;
+  /** Claims the resume slot. `false` means one is already running. */
+  beginResume: (sessionId: string) => boolean;
+  endResume: (sessionId: string) => void;
 }
 
 const STORAGE_KEY = "shep.restorableSessions";
@@ -160,6 +165,26 @@ export const useSessionRestoreStore = create<SessionRestoreStore>((set, get) => 
     else delete next[projectPath];
     persist(next);
     set({ sessions: next });
+  },
+
+  resuming: {},
+
+  beginResume: (sessionId) => {
+    // Spawning a shell and typing into it takes long enough that the row stays
+    // clickable throughout. Without this, an impatient second click starts a
+    // second agent on the same conversation.
+    if (get().resuming[sessionId]) return false;
+    set((state) => ({ resuming: { ...state.resuming, [sessionId]: true } }));
+    return true;
+  },
+
+  endResume: (sessionId) => {
+    set((state) => {
+      if (!state.resuming[sessionId]) return state;
+      const resuming = { ...state.resuming };
+      delete resuming[sessionId];
+      return { resuming };
+    });
   },
 
   forgetProject: (projectPath) => {

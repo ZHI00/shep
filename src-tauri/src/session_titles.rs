@@ -821,7 +821,7 @@ fn resolve_claude(
 ) -> Option<SessionTitleMatch> {
     let directory = home
         .join(".claude/projects")
-        .join(repo_path.replace(['/', '\\', ':'], "-"));
+        .join(claude_project_directory(repo_path));
     let pid_session_id = session_id
         .map(ToString::to_string)
         .or_else(|| claude_pid_session_id(home, repo_path, process_id));
@@ -860,7 +860,13 @@ fn resolve_jsonl_session_directory(
     session_id: Option<&str>,
     provider: JsonlProvider,
 ) -> Option<SessionTitleMatch> {
+    let floor = started_after_ms.saturating_sub(LAUNCH_TOLERANCE_MS);
     let mut candidates = Vec::new();
+    // Sessions the agent continued rather than started: their first message
+    // predates this PTY, so `created_at_ms` disqualifies them even though the
+    // file is being written to right now. Ranked by write time and only used
+    // when nothing was started fresh, so a genuinely new session always wins.
+    let mut continued = Vec::new();
     for entry in fs::read_dir(directory).ok()?.flatten() {
         let path = entry.path();
         if path.extension().and_then(|extension| extension.to_str()) != Some("jsonl") {
@@ -875,19 +881,33 @@ fn resolve_jsonl_session_directory(
         let Some(info) = read_jsonl_session(&path, repo_path, provider) else {
             continue;
         };
-        if session_id.is_none()
-            && info.created_at_ms < started_after_ms.saturating_sub(LAUNCH_TOLERANCE_MS)
-        {
+        if session_id.is_none() && info.created_at_ms < floor {
+            let Some(modified_ms) = file_modified_ms(&path) else {
+                continue;
+            };
+            if modified_ms >= floor {
+                continued.push((modified_ms, id, info.title));
+            }
             continue;
         }
         let distance = info.created_at_ms.abs_diff(started_after_ms);
         candidates.push((distance, id, info.title));
     }
     candidates.sort_by_key(|candidate| candidate.0);
-    candidates
+    if let Some((_, session_id, title)) = candidates.into_iter().next() {
+        return Some(SessionTitleMatch { session_id, title });
+    }
+    continued.sort_by_key(|candidate| std::cmp::Reverse(candidate.0));
+    continued
         .into_iter()
         .next()
         .map(|(_, session_id, title)| SessionTitleMatch { session_id, title })
+}
+
+fn file_modified_ms(path: &Path) -> Option<i64> {
+    let modified = fs::metadata(path).ok()?.modified().ok()?;
+    let since_epoch = modified.duration_since(std::time::UNIX_EPOCH).ok()?;
+    i64::try_from(since_epoch.as_millis()).ok()
 }
 
 fn jsonl_session_id(path: &Path, provider: JsonlProvider) -> Option<String> {
@@ -1005,6 +1025,19 @@ fn parse_timestamp_ms(timestamp: &str) -> Option<i64> {
         .map(|date_time| date_time.timestamp_millis())
 }
 
+/// Claude's on-disk name for a project directory. It replaces every character
+/// that isn't alphanumeric with a dash — dots included, so `manage-2.0pc`
+/// lives under `...-manage-2-0pc`. Replacing only the separators finds nothing
+/// for any project with a dot in its path, which leaves those sessions without
+/// a resolved id: they never reach the restore snapshot and look lost after a
+/// restart.
+fn claude_project_directory(repo_path: &str) -> String {
+    repo_path
+        .chars()
+        .map(|c| if c.is_ascii_alphanumeric() { c } else { '-' })
+        .collect()
+}
+
 fn pi_project_directory(repo_path: &str) -> String {
     let without_root = repo_path.trim_start_matches(['/', '\\']);
     let safe = without_root.replace(['/', '\\', ':'], "-");
@@ -1033,6 +1066,106 @@ mod tests {
         path
     }
 
+
+    #[test]
+    fn claude_project_directory_matches_claudes_own_escaping() {
+        // Claude dashes every non-alphanumeric character, so a dotted project
+        // name has to be looked up with the dots dashed as well.
+        assert_eq!(
+            claude_project_directory("/Users/me/Documents/manage-2.0pc"),
+            "-Users-me-Documents-manage-2-0pc"
+        );
+        assert_eq!(
+            claude_project_directory("/Users/me/Documents/shep"),
+            "-Users-me-Documents-shep"
+        );
+        assert_eq!(
+            claude_project_directory("/Users/me/my project"),
+            "-Users-me-my-project"
+        );
+    }
+
+    #[test]
+    fn claude_resolves_a_session_in_a_dotted_project() {
+        let home = temp_home();
+        let repo = "/Users/me/Documents/manage-2.0pc";
+        // Claude dashes the dot, so this is where the session actually lives.
+        let dir = home
+            .join(".claude/projects")
+            .join("-Users-me-Documents-manage-2-0pc");
+        fs::create_dir_all(&dir).unwrap();
+        fs::write(
+            dir.join("session-1.jsonl"),
+            concat!(
+                "{\"type\":\"mode\",\"sessionId\":\"session-1\"}\n",
+                "{\"type\":\"user\",\"cwd\":\"/Users/me/Documents/manage-2.0pc\",\"timestamp\":\"2026-08-07T12:00:01Z\",\"message\":{\"role\":\"user\",\"content\":\"Fix the dotted project lookup please\"}}\n"
+            ),
+        )
+        .unwrap();
+        let started = parse_timestamp_ms("2026-08-07T12:00:00Z").unwrap();
+
+        let found = resolve_session_title_from_home(&home, "claude", repo, started, None, None)
+            .expect("a dotted project's session must be found");
+        assert_eq!(found.session_id, "session-1");
+
+        fs::remove_dir_all(home).unwrap();
+    }
+
+    #[test]
+    fn claude_resolves_a_session_it_continued_rather_than_started() {
+        let home = temp_home();
+        let repo = "/repo";
+        let dir = home.join(".claude/projects/-repo");
+        fs::create_dir_all(&dir).unwrap();
+        // Written long before this PTY launched — the shape of any session
+        // picked up with `--resume`, or continued from inside the agent.
+        fs::write(
+            dir.join("old-session.jsonl"),
+            concat!(
+                "{\"type\":\"mode\",\"sessionId\":\"old-session\"}\n",
+                "{\"type\":\"user\",\"cwd\":\"/repo\",\"timestamp\":\"2026-08-01T09:00:00Z\",\"message\":{\"role\":\"user\",\"content\":\"Started this days ago\"}}\n"
+            ),
+        )
+        .unwrap();
+        let started = parse_timestamp_ms("2026-08-07T12:00:00Z").unwrap();
+
+        let found = resolve_session_title_from_home(&home, "claude", repo, started, None, None)
+            .expect("a continued session must still be identified");
+        assert_eq!(found.session_id, "old-session");
+
+        fs::remove_dir_all(home).unwrap();
+    }
+
+    #[test]
+    fn a_freshly_started_session_outranks_a_continued_one() {
+        let home = temp_home();
+        let repo = "/repo";
+        let dir = home.join(".claude/projects/-repo");
+        fs::create_dir_all(&dir).unwrap();
+        fs::write(
+            dir.join("old-session.jsonl"),
+            concat!(
+                "{\"type\":\"mode\",\"sessionId\":\"old-session\"}\n",
+                "{\"type\":\"user\",\"cwd\":\"/repo\",\"timestamp\":\"2026-08-01T09:00:00Z\",\"message\":{\"role\":\"user\",\"content\":\"Started this days ago\"}}\n"
+            ),
+        )
+        .unwrap();
+        fs::write(
+            dir.join("new-session.jsonl"),
+            concat!(
+                "{\"type\":\"mode\",\"sessionId\":\"new-session\"}\n",
+                "{\"type\":\"user\",\"cwd\":\"/repo\",\"timestamp\":\"2026-08-07T12:00:01Z\",\"message\":{\"role\":\"user\",\"content\":\"Just started this one\"}}\n"
+            ),
+        )
+        .unwrap();
+        let started = parse_timestamp_ms("2026-08-07T12:00:00Z").unwrap();
+
+        let found = resolve_session_title_from_home(&home, "claude", repo, started, None, None)
+            .expect("the new session must be found");
+        assert_eq!(found.session_id, "new-session");
+
+        fs::remove_dir_all(home).unwrap();
+    }
 
     #[test]
     fn compact_prompt_titles_fit_the_sidebar() {

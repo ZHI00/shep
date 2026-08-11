@@ -1,6 +1,7 @@
 import { useCallback, useState } from "react";
 import { createPortal } from "react-dom";
-import { RotateCcw, Trash2 } from "lucide-react";
+import { Loader2, RotateCcw, Trash2 } from "lucide-react";
+import { useSessionRestoreStore } from "../../stores/useSessionRestoreStore";
 import { assistantLogoSrc, getAssistantLogoClass } from "../../lib/assistantLogos";
 import { handleActionKey } from "../../lib/a11y";
 import tabKindMeta from "../../lib/tabKindMeta";
@@ -26,9 +27,10 @@ export default function RestorableSessionRow({
 }: RestorableSessionRowProps) {
   const [menu, setMenu] = useState<{ x: number; y: number } | null>(null);
   const t = useT();
+  const resuming = useSessionRestoreStore((s) => !!s.resuming[session.sessionId]);
   const logoUrl = assistantLogoSrc[session.provider];
   const label = session.title || t("session.fallbackName");
-  const tooltip = t("session.resumeHint");
+  const tooltip = resuming ? t("session.resuming") : t("session.resumeHint");
 
   const handleContextMenu = useCallback((event: React.MouseEvent) => {
     event.preventDefault();
@@ -39,12 +41,13 @@ export default function RestorableSessionRow({
   return (
     <>
       <div
-        className="project-session-row project-session-row--dormant"
-        onClick={onResume}
+        className={`project-session-row project-session-row--dormant${resuming ? " is-resuming" : ""}`}
+        onClick={resuming ? undefined : onResume}
         onContextMenu={handleContextMenu}
-        onKeyDown={(event) => handleActionKey(event, onResume)}
+        onKeyDown={(event) => { if (!resuming) handleActionKey(event, onResume); }}
         title={`${label} — ${tooltip}`}
         role="button"
+        aria-busy={resuming}
         tabIndex={0}
         aria-label={`${label}, ${tooltip}`}
       >
@@ -62,7 +65,11 @@ export default function RestorableSessionRow({
           </span>
         )}
         <span className="project-session-row__label truncate">{label}</span>
-        <RotateCcw size={11} className="project-session-row__resume-hint" aria-hidden="true" />
+        {resuming ? (
+          <Loader2 size={11} className="project-session-row__resume-hint animate-spin" aria-hidden="true" />
+        ) : (
+          <RotateCcw size={11} className="project-session-row__resume-hint" aria-hidden="true" />
+        )}
       </div>
       {menu && createPortal(
         <ContextMenu
@@ -72,6 +79,7 @@ export default function RestorableSessionRow({
             {
               label: t("session.resume"),
               icon: <RotateCcw size={14} />,
+              // A resume already in flight is rejected by the store's lock.
               onClick: onResume,
             },
             {

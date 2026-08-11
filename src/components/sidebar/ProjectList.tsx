@@ -29,6 +29,7 @@ interface ProjectListProps {
   onForgetSession: (session: RestorableSession) => void;
   onAddProject: (repoPath: string) => Promise<void>;
   onRemoveProject: (repoPath: string) => void;
+  onCloseProjectSessions: (repoPath: string) => void;
   onOpenInEditor: (repoPath: string) => void;
   onProjectAction: (repoPath: string, action: ProjectActionKind) => void;
   onRenameGroup: (groupId: string, newName: string) => void;
@@ -50,6 +51,7 @@ export default function ProjectList({
   onForgetSession,
   onAddProject,
   onRemoveProject,
+  onCloseProjectSessions,
   onOpenInEditor,
   onProjectAction,
   onRenameGroup,
@@ -209,6 +211,7 @@ export default function ProjectList({
           groups={groups}
           onOpenInEditor={() => onOpenInEditor(repo.path)}
           onRemove={() => onRemoveProject(repo.path)}
+          onCloseAllSessions={() => onCloseProjectSessions(repo.path)}
           onClick={() => handleProjectClick(repo.path)}
           onToggleExpand={() => handleToggleExpand(repo.path)}
           onProjectAction={(action) => onProjectAction(repo.path, action)}

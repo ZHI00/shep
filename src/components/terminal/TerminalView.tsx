@@ -226,10 +226,9 @@ export default function TerminalView({
     };
     const handleKeyDownCapture = (event: KeyboardEvent) => {
       // While an IME is composing, every keystroke is part of an unfinished
-      // character. Scrolling now moves xterm's hidden textarea out from under
-      // the candidate window and drops the composition — which is why CJK
-      // input needed a second attempt. keyCode 229 is the legacy signal some
-      // IMEs still send instead of isComposing.
+      // character — arrow keys and digits navigate the candidate window, so
+      // none of the viewport handling below may run. keyCode 229 is the legacy
+      // signal some IMEs still send instead of isComposing.
       if (composingRef.current || event.isComposing || event.keyCode === 229) return;
 
       const viewportKey = event.shiftKey && [
@@ -248,9 +247,15 @@ export default function TerminalView({
         return;
       }
 
-      // Normal terminal input resumes follow mode before xterm emits onData.
-      pinnedToBottomRef.current = true;
-      term.scrollToBottom();
+      // No scrollToBottom here: scrolling repositions xterm's hidden textarea,
+      // and WebKit drops IME input whose textarea moves mid-transition. The
+      // composing guard above can't cover the boundary keystrokes — an IME
+      // commits punctuation with composition events that begin and end inside
+      // a single keydown, and rapid candidate-digit input lands right after
+      // compositionend clears the flag — which cost exactly one lost keypress
+      // ("type twice"). Follow mode is restored in onData instead, which fires
+      // only once input has actually committed and the candidate window is
+      // gone.
     };
     // compositionend fires before the final keydown, so the flag is cleared on
     // the next tick to cover that trailing event too.
@@ -267,6 +272,11 @@ export default function TerminalView({
     surface.addEventListener("keydown", handleKeyDownCapture, { capture: true });
     surface.addEventListener("compositionstart", handleCompositionStart, { capture: true });
     surface.addEventListener("compositionend", handleCompositionEnd, { capture: true });
+
+    // Focus now, not only in the deferred pass below: that one runs a frame
+    // plus 100ms after the switch, and keystrokes in between land on whatever
+    // button was clicked to get here.
+    term.focus();
 
     const attachTerminal = async () => {
       await new Promise<void>((resolve) => requestAnimationFrame(() => resolve()));

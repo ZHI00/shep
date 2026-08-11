@@ -19,6 +19,11 @@ interface TerminalStore {
   removeTab: (id: string) => void;
   /** Empties every project's tab list. PTY teardown is the caller's job. */
   clearAllTabs: () => void;
+  /**
+   * Removes one project's terminal/assistant tabs, keeping panel tabs.
+   * PTY teardown is the caller's job.
+   */
+  clearProjectSessionTabs: (repoPath: string) => void;
   detachTab: (id: string) => void;
   attachTab: (id: string) => void;
   setActiveTab: (id: string) => void;
@@ -86,8 +91,27 @@ function isUuid(value: string): boolean {
   return /^[0-9a-f]{8}-[0-9a-f]{4}-[1-8][0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$/i.test(value);
 }
 
+/**
+ * Shells retitle the window with the name of the command they are running, so
+ * an agent launched as `cc` reports the title "cc" for as long as it takes the
+ * agent to print one of its own. Agents title themselves with a summary of the
+ * conversation — a phrase, never a bare token — so anything that looks like a
+ * command name is the shell talking, not the agent. Taking it renames a
+ * resumed conversation to "cc", which reads as a stray session appearing out
+ * of nowhere and the original one going missing.
+ */
+function looksLikeCommandName(title: string): boolean {
+  return title.length <= 24 && /^[A-Za-z0-9._\-/]+$/.test(title);
+}
+
 function usefulPtyTitle(tab: TerminalTabData, title: string): string | null {
   const project = projectName(tab.repoPath);
+
+  // Plain terminals are expected to be named after what they run; only agent
+  // tabs, which carry a conversation, are protected from that.
+  if (tab.kind === "assistant" && looksLikeCommandName(title.replace(/^\*+\s*/, "").trim())) {
+    return null;
+  }
 
   if (tab.assistantId === "claude") {
     // Claude prefixes its OSC title with `*` while it is actively working.
@@ -232,6 +256,25 @@ export const useTerminalStore = create<TerminalStore>((set, get) => ({
         projectState[path] = emptyState();
       }
       return { projectState };
+    });
+  },
+
+  clearProjectSessionTabs: (repoPath: string) => {
+    set((state) => {
+      const ps = state.projectState[repoPath];
+      if (!ps) return state;
+      const tabs = ps.tabs.filter(
+        (tab) => tab.kind !== "terminal" && tab.kind !== "assistant",
+      );
+      const activeTabId = tabs.some((tab) => tab.id === ps.activeTabId)
+        ? ps.activeTabId
+        : (tabs.find((tab) => !isTabDetached(tab))?.id ?? null);
+      return {
+        projectState: {
+          ...state.projectState,
+          [repoPath]: { tabs, activeTabId },
+        },
+      };
     });
   },
 

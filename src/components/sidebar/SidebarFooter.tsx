@@ -57,7 +57,7 @@ export default function SidebarFooter({ onCloseAllTabs }: SidebarFooterProps) {
           aria-label={t("sidebar.closeAllTitle")}
         >
           <CircleX size={18} />
-          <span className="text-[10px]">{t("sidebar.closeAll")}</span>
+          <span className="text-[10px] whitespace-nowrap">{t("sidebar.closeAll")}</span>
         </button>
       </div>
     </div>
