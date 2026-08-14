@@ -53,8 +53,6 @@ export default function TerminalView({
   const mountedRef = useRef(false);
   const attachedRef = useRef(false);
   const pinnedToBottomRef = useRef(true);
-  /** True while an IME composition is in flight (CJK, accents, emoji picker). */
-  const composingRef = useRef(false);
   const columnResizeTimerRef = useRef<ReturnType<typeof setTimeout> | null>(null);
 
   const getOrCreateTerminal = useCallback(() => {
@@ -70,6 +68,11 @@ export default function TerminalView({
       lineHeight: TERMINAL_LINE_HEIGHT,
       theme: createTerminalTheme(useThemeStore.getState().theme),
       scrollback: termSettings.scrollback,
+      // Shep owns follow-mode (onData + the write callback below). xterm's
+      // built-in scroll-on-input also fires on the keyCode-229 keydowns an IME
+      // sends mid-composition, and any scroll there repositions the hidden
+      // textarea — which WebKit answers by dropping the composition.
+      scrollOnUserInput: false,
       allowTransparency: true,
       allowProposedApi: true,
       linkHandler: {
@@ -88,10 +91,64 @@ export default function TerminalView({
       void openUrl(url);
     }));
 
+    const entry = {
+      term,
+      fitAddon,
+      rendererAddon: null as WebglAddon | null,
+      webglFailed: false,
+      composing: false,
+      recentInputs: [] as { data: string; at: number }[],
+    };
+
+    // Terminal replies travel through onData exactly like typing does: focus
+    // in/out (DEC 1004, which agent TUIs turn on), OSC colour answers, window
+    // size reports. xterm marks them as not-user-input, and that mark is the
+    // only thing here that tells them apart from a keystroke. Switching to
+    // another app and back sends focus-out then focus-in, so without the check
+    // below the terminal treated leaving the app as typing and yanked the view
+    // to the bottom, discarding wherever the user had scrolled to.
+    const coreService = (term as unknown as {
+      _core?: { coreService?: { onUserInput?: (listener: () => void) => unknown } };
+    })._core?.coreService;
+    const onUserInput =
+      typeof coreService?.onUserInput === "function" ? coreService.onUserInput : null;
+    if (!onUserInput && import.meta.env.DEV) {
+      console.warn(
+        "xterm no longer exposes coreService.onUserInput; terminal reports will re-pin the viewport",
+      );
+    }
+    let sawUserInput = false;
+    // Fires immediately before the onData it belongs to, so the flag pairs up.
+    onUserInput?.(() => {
+      sawUserInput = true;
+    });
+
+    // Mouse tracking reports are user input by xterm's reckoning — the same
+    // flag a keystroke carries — so right-clicking (or any click, or a drag)
+    // inside an agent TUI counted as typing and jumped the view to the bottom.
+    // Real terminals only follow output again when you type, so the reports
+    // are matched out here. xterm 6 emits exactly one shape through onData,
+    // `CSI < btn ; col ; row M|m`; the older single-byte encoding goes out as
+    // a binary event and never reaches this callback.
+    const isMouseReport = (data: string) => /^\x1b\[<\d+;\d+;\d+[Mm]$/.test(data);
+
     // Send input to PTY
     term.onData((data) => {
-      pinnedToBottomRef.current = true;
-      term.scrollToBottom();
+      // A future xterm could drop the private signal; without it every data
+      // event counts as input, which is the behaviour this replaces.
+      const wasUserInput = (onUserInput ? sawUserInput : true) && !isMouseReport(data);
+      sawUserInput = false;
+
+      entry.recentInputs.push({ data, at: performance.now() });
+      if (entry.recentInputs.length > 32) entry.recentInputs.shift();
+      if (wasUserInput) {
+        pinnedToBottomRef.current = true;
+        // Scrolling repositions xterm's hidden textarea and WebKit drops IME
+        // input whose textarea moves mid-transition, so while a composition is
+        // active the scroll is left to the write callback: it runs on the
+        // echoed output, and pinnedToBottom is already set.
+        if (!entry.composing) term.scrollToBottom();
+      }
       writePty(ptyId, data).catch((error) => {
         if (import.meta.env.DEV) {
           console.error("Failed to write PTY input:", error);
@@ -138,12 +195,6 @@ export default function TerminalView({
       return true; // let xterm handle normally
     });
 
-    const entry = {
-      term,
-      fitAddon,
-      rendererAddon: null as WebglAddon | null,
-      webglFailed: false,
-    };
     terminalCache.set(ptyId, entry);
     return entry;
   }, [ptyId]);
@@ -275,7 +326,8 @@ export default function TerminalView({
   useEffect(() => {
     if (!containerRef.current || !visible) return;
 
-    const { term } = getOrCreateTerminal();
+    const entry = getOrCreateTerminal();
+    const { term } = entry;
     let disposed = false;
 
     if (!mountedRef.current) {
@@ -310,7 +362,7 @@ export default function TerminalView({
       // character — arrow keys and digits navigate the candidate window, so
       // none of the viewport handling below may run. keyCode 229 is the legacy
       // signal some IMEs still send instead of isComposing.
-      if (composingRef.current || event.isComposing || event.keyCode === 229) return;
+      if (entry.composing || event.isComposing || event.keyCode === 229) return;
 
       const viewportKey = event.shiftKey && [
         "PageUp",
@@ -334,25 +386,69 @@ export default function TerminalView({
       // commits punctuation with composition events that begin and end inside
       // a single keydown, and rapid candidate-digit input lands right after
       // compositionend clears the flag — which cost exactly one lost keypress
-      // ("type twice"). Follow mode is restored in onData instead, which fires
-      // only once input has actually committed and the candidate window is
-      // gone.
+      // ("type twice"). Follow mode is restored in onData instead, and only
+      // when no composition is active.
     };
-    // compositionend fires before the final keydown, so the flag is cleared on
-    // the next tick to cover that trailing event too.
-    const handleCompositionStart = () => {
-      composingRef.current = true;
-    };
-    const handleCompositionEnd = () => {
+    // WKWebView can settle the textarea's value after xterm's deferred
+    // composition read, in which case xterm sends nothing and the committed
+    // character only surfaces on the NEXT keystroke — the "type twice" bug,
+    // most visible with fullwidth punctuation (Shift+; → ：), whose whole
+    // composition lives inside a single keydown. The recovery below waits out
+    // xterm's own send paths (all setTimeout(0), so any later timer runs after
+    // them), then injects the committed text itself if it never reached
+    // onData. The containment check (not equality) is deliberate: xterm may
+    // deliver a commit batched with trailing keystrokes.
+    const recoverDroppedInput = (text: string) => {
+      const since = performance.now() - 100;
       window.setTimeout(() => {
-        composingRef.current = false;
+        if (terminalCache.get(ptyId) !== entry) return;
+        const delivered = entry.recentInputs.some(
+          (input) => input.at >= since && input.data.includes(text),
+        );
+        if (import.meta.env.DEV) {
+          console.debug(
+            `[terminal-ime] commit ${JSON.stringify(text)} delivered=${delivered}${delivered ? "" : " → injecting"}`,
+          );
+        }
+        if (!delivered) term.input(text, true);
+      }, 30);
+    };
+
+    // compositionend fires before the final keydown, so the flag is cleared on
+    // the next tick to cover that trailing event too. The pending clear must
+    // die when a new composition starts, or it would mark an in-flight
+    // composition as finished.
+    let composingClearTimer: number | null = null;
+    const handleCompositionStart = () => {
+      if (composingClearTimer !== null) {
+        window.clearTimeout(composingClearTimer);
+        composingClearTimer = null;
+      }
+      entry.composing = true;
+    };
+    const handleCompositionEnd = (event: Event) => {
+      composingClearTimer = window.setTimeout(() => {
+        composingClearTimer = null;
+        entry.composing = false;
       }, 0);
+      const committed = (event as CompositionEvent).data;
+      if (committed) recoverDroppedInput(committed);
+    };
+    // Some IMEs commit without composition events at all (fullwidth
+    // punctuation on certain layouts, WKWebView dead-key cancellation): the
+    // text arrives as a plain insertText input event, which xterm suppresses
+    // whenever a keydown preceded it. Same recovery applies.
+    const handleInputCapture = (event: Event) => {
+      const input = event as InputEvent;
+      if (input.inputType !== "insertText" || !input.data || entry.composing) return;
+      recoverDroppedInput(input.data);
     };
 
     surface.addEventListener("wheel", handleWheelCapture, { capture: true });
     surface.addEventListener("keydown", handleKeyDownCapture, { capture: true });
     surface.addEventListener("compositionstart", handleCompositionStart, { capture: true });
     surface.addEventListener("compositionend", handleCompositionEnd, { capture: true });
+    surface.addEventListener("input", handleInputCapture, { capture: true });
 
     // Focus now, not only in the deferred pass below: that one runs a frame
     // plus 100ms after the switch, and keystrokes in between land on whatever
@@ -474,6 +570,11 @@ export default function TerminalView({
       surface.removeEventListener("keydown", handleKeyDownCapture, { capture: true });
       surface.removeEventListener("compositionstart", handleCompositionStart, { capture: true });
       surface.removeEventListener("compositionend", handleCompositionEnd, { capture: true });
+      surface.removeEventListener("input", handleInputCapture, { capture: true });
+      if (composingClearTimer !== null) {
+        window.clearTimeout(composingClearTimer);
+        entry.composing = false;
+      }
       if (columnResizeTimerRef.current) {
         clearTimeout(columnResizeTimerRef.current);
         columnResizeTimerRef.current = null;

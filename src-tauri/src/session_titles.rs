@@ -809,6 +809,8 @@ fn resolve_pi(
         started_after_ms,
         session_id,
         JsonlProvider::Pi,
+        true,
+        &HashSet::new(),
     )
 }
 
@@ -822,15 +824,32 @@ fn resolve_claude(
     let directory = home
         .join(".claude/projects")
         .join(claude_project_directory(repo_path));
-    let pid_session_id = session_id
-        .map(ToString::to_string)
-        .or_else(|| claude_pid_session_id(home, repo_path, process_id));
+    if let Some(id) = session_id {
+        return resolve_jsonl_session_directory(
+            &directory,
+            repo_path,
+            started_after_ms,
+            Some(id),
+            JsonlProvider::Claude,
+            true,
+            &HashSet::new(),
+        );
+    }
+    let floor = started_after_ms.saturating_sub(LAUNCH_TOLERANCE_MS);
+    let sessions = claude_pid_sessions(home, repo_path, process_id, floor);
+    // Records exist for this project but none is ours yet — this CLI does write
+    // pid records, ours just hasn't landed. Guessing by "recently written" now
+    // would claim a neighbour's session (and its title) permanently, so the
+    // continued fallback stays off until our own record appears.
+    let allow_continued = sessions.mine.is_some() || !sessions.records_exist;
     resolve_jsonl_session_directory(
         &directory,
         repo_path,
         started_after_ms,
-        pid_session_id.as_deref(),
+        sessions.mine.as_deref(),
         JsonlProvider::Claude,
+        allow_continued,
+        &sessions.rivals,
     )
 }
 
@@ -852,34 +871,41 @@ fn read_claude_pid_session(path: &Path, repo_path: &str) -> Option<ClaudePidSess
     })
 }
 
-/// The session id claimed by the agent running in this tab, which is what makes
-/// the title exact instead of a guess from timestamps.
+#[derive(Default)]
+struct ClaudePidSessions {
+    /// The session this tab's own agent registered under its pid.
+    mine: Option<String>,
+    /// Sessions live agents outside this tab's process tree have claimed. A tab
+    /// still waiting for its own first prompt must never adopt one of these,
+    /// however close their timestamps look.
+    rivals: HashSet<String>,
+    /// Whether this CLI files pid records for the project at all. Older ones
+    /// don't, and then timestamps are the only evidence there is.
+    records_exist: bool,
+}
+
+/// Who owns which session in this project, which is what makes a title exact
+/// instead of a guess from timestamps.
 ///
 /// The PTY's direct child is the login shell — Shep starts `zsh -l` and the
-/// agent runs inside it — while Claude files its record under its own pid. So
-/// `{pid}.json` normally does not exist, and matching has to walk up from each
-/// recorded pid to see whether it belongs to this tab's process tree. Without
-/// that walk the resolver always fell back to picking the session file whose
-/// timestamps looked closest, and a second Claude running in the same project
-/// could win: the tab then showed someone else's opening prompt.
-fn claude_pid_session_id(home: &Path, repo_path: &str, process_id: Option<u32>) -> Option<String> {
-    let process_id = process_id?;
-    let sessions = home.join(".claude/sessions");
+/// agent runs inside it — while Claude files its record under its own pid, so
+/// matching walks up from each recorded pid to see whether it belongs to this
+/// tab's process tree. Without that walk the resolver fell back to picking the
+/// session file whose timestamps looked closest, and a second Claude in the
+/// same project could win: the tab then showed someone else's opening prompt.
+fn claude_pid_sessions(
+    home: &Path,
+    repo_path: &str,
+    process_id: Option<u32>,
+    floor_ms: i64,
+) -> ClaudePidSessions {
+    let mut sessions = ClaudePidSessions::default();
+    let Ok(entries) = fs::read_dir(home.join(".claude/sessions")) else {
+        return sessions;
+    };
 
-    // Fast path: the agent is the PTY's direct child (no shell in between).
-    if let Some(record) =
-        read_claude_pid_session(&sessions.join(format!("{process_id}.json")), repo_path)
-    {
-        if record.pid == process_id {
-            return Some(record.session_id);
-        }
-    }
-
-    // Otherwise scan for the record whose process descends from this PTY. Ties
-    // go to the most recently started, which is the live one after a restart
-    // left a stale file behind under a since-recycled pid.
-    let mut best: Option<ClaudePidSession> = None;
-    for entry in fs::read_dir(&sessions).ok()?.flatten() {
+    let mut ours: Option<ClaudePidSession> = None;
+    for entry in entries.flatten() {
         let path = entry.path();
         if path.extension().and_then(|value| value.to_str()) != Some("json") {
             continue;
@@ -887,17 +913,41 @@ fn claude_pid_session_id(home: &Path, repo_path: &str, process_id: Option<u32>) 
         let Some(record) = read_claude_pid_session(&path, repo_path) else {
             continue;
         };
-        if !is_descendant_of(record.pid, process_id) {
+        sessions.records_exist = true;
+        // Records outlive the agents that wrote them, and a pid nobody is using
+        // says nothing about who owns what.
+        if !is_running(record.pid) {
             continue;
         }
-        if best
+        // Ours runs inside this tab's process tree, and cannot predate the tab
+        // itself — the start time is what rules out a stale record left under a
+        // pid the system has since handed to our own shell. A record that
+        // carries no start time can't be disqualified by one.
+        let predates_this_tab = record.started_at_ms != 0 && record.started_at_ms < floor_ms;
+        let ours_now = !predates_this_tab
+            && process_id.is_some_and(|pty_child| is_descendant_of(record.pid, pty_child));
+        if !ours_now {
+            sessions.rivals.insert(record.session_id);
+            continue;
+        }
+        // Ties go to the most recently started, which is the live one after a
+        // restart left a stale file behind under a since-recycled pid.
+        if ours
             .as_ref()
             .is_none_or(|current| record.started_at_ms > current.started_at_ms)
         {
-            best = Some(record);
+            ours = Some(record);
         }
     }
-    best.map(|record| record.session_id)
+
+    sessions.mine = ours.map(|record| record.session_id);
+    sessions
+}
+
+/// Whether a pid still belongs to a live process. `parent_pid` reads the
+/// process table, so an exited pid answers `None`.
+fn is_running(pid: u32) -> bool {
+    parent_pid(pid).is_some()
 }
 
 fn is_descendant_of(pid: u32, ancestor: u32) -> bool {
@@ -953,6 +1003,8 @@ fn resolve_jsonl_session_directory(
     started_after_ms: i64,
     session_id: Option<&str>,
     provider: JsonlProvider,
+    allow_continued: bool,
+    claimed: &HashSet<String>,
 ) -> Option<SessionTitleMatch> {
     let floor = started_after_ms.saturating_sub(LAUNCH_TOLERANCE_MS);
     let mut candidates = Vec::new();
@@ -972,14 +1024,29 @@ fn resolve_jsonl_session_directory(
         if session_id.is_some_and(|expected| expected != id) {
             continue;
         }
+        // A session a live agent has already claimed is never this tab's, no
+        // matter how close its timestamps look. Two agents opened seconds apart
+        // in one project are exactly that case: the second tab has no file of
+        // its own until its first prompt lands, and the first tab's session sits
+        // inside the launch tolerance looking like a perfect match.
+        if claimed.contains(&id) {
+            continue;
+        }
         let Some(info) = read_jsonl_session(&path, repo_path, provider) else {
             continue;
         };
         if session_id.is_none() && info.created_at_ms < floor {
+            if !allow_continued {
+                continue;
+            }
             let Some(modified_ms) = file_modified_ms(&path) else {
                 continue;
             };
-            if modified_ms >= floor {
+            // Written to since this tab opened, not merely inside the launch
+            // tolerance: an agent the user closed a few seconds beforehand
+            // leaves a file that would otherwise qualify forever, and the new
+            // tab would wear the session it just finished.
+            if modified_ms >= started_after_ms {
                 continued.push((modified_ms, id, info.title));
             }
             continue;
@@ -1084,12 +1151,19 @@ fn read_jsonl_session(
                 else {
                     continue;
                 };
+                // Command rows still mark when the session started; they are
+                // only excluded as titles below.
                 created_at_ms.get_or_insert(timestamp);
-                if first_prompt.is_none() {
+                let is_meta = row
+                    .get("isMeta")
+                    .and_then(Value::as_bool)
+                    .unwrap_or(false);
+                if first_prompt.is_none() && !is_meta {
                     first_prompt = row
                         .get("message")
                         .and_then(|message| message.get("content"))
                         .and_then(message_content_text)
+                        .filter(|text| !is_claude_command_transcript(text))
                         .and_then(|text| compact_prompt_title(&text));
                 }
                 // Claude has no equivalent of Pi's `session_info`, so the start
@@ -1108,6 +1182,17 @@ fn read_jsonl_session(
         created_at_ms: created_at_ms?,
         title: explicit_name.or(first_prompt),
     })
+}
+
+/// A slash command writes bookkeeping rows into the transcript before the
+/// user's real prompt — a caveat notice, the command invocation, its stdout —
+/// all `type: "user"`. A session opened with `/model` would otherwise be
+/// titled "<local-command-caveat…".
+fn is_claude_command_transcript(text: &str) -> bool {
+    let trimmed = text.trim_start();
+    trimmed.starts_with("<command-")
+        || trimmed.starts_with("<local-command-")
+        || trimmed.starts_with("Caveat:")
 }
 
 fn message_content_text(content: &Value) -> Option<String> {
@@ -1258,13 +1343,15 @@ mod tests {
         let dir = home.join(".claude/projects/-repo");
         fs::create_dir_all(&dir).unwrap();
 
+        let started = parse_timestamp_ms("2026-08-07T12:00:00Z").unwrap();
         // This test process stands in for the agent: it is a descendant of
         // itself, which is what the walk has to accept.
         let agent_pid = std::process::id();
         fs::write(
             sessions.join(format!("{agent_pid}.json")),
             format!(
-                "{{\"pid\":{agent_pid},\"sessionId\":\"mine\",\"cwd\":\"/repo\",\"startedAt\":1}}"
+                "{{\"pid\":{agent_pid},\"sessionId\":\"mine\",\"cwd\":\"/repo\",\"startedAt\":{}}}",
+                started + 1_000
             ),
         )
         .unwrap();
@@ -1294,7 +1381,7 @@ mod tests {
 
         // Both transcripts predate the launch, so without the pid match the
         // resolver would be guessing between them.
-        let started = parse_timestamp_ms("2026-08-07T12:00:00Z").unwrap();
+        //
         // The PTY's own child is the shell; pass the agent pid's parent chain
         // through the real process table by using this process as the anchor.
         let found =
@@ -1853,6 +1940,219 @@ mod tests {
         let found =
             resolve_session_title_from_home(&home, "pi", repo, started, None, None).unwrap();
         assert_eq!(found.title.as_deref(), Some("restore sessions"));
+
+        fs::remove_dir_all(home).unwrap();
+    }
+
+    /// A session opened with a slash command logs a caveat, the command, and
+    /// its stdout as `user` rows before the real prompt arrives.
+    #[test]
+    fn claude_skips_command_transcript_rows_when_titling() {
+        let home = temp_home();
+        let repo = "/repo";
+        let dir = home.join(".claude/projects/-repo");
+        fs::create_dir_all(&dir).unwrap();
+        fs::write(
+            dir.join("session-1.jsonl"),
+            concat!(
+                "{\"type\":\"user\",\"isMeta\":true,\"cwd\":\"/repo\",\"timestamp\":\"2026-08-07T12:00:01Z\",\"message\":{\"role\":\"user\",\"content\":\"<local-command-caveat>Caveat: The messages below were generated by the user while running local commands.</local-command-caveat>\"}}\n",
+                "{\"type\":\"user\",\"cwd\":\"/repo\",\"timestamp\":\"2026-08-07T12:00:02Z\",\"message\":{\"role\":\"user\",\"content\":\"<command-name>/model</command-name>\\n<command-message>model</command-message>\"}}\n",
+                "{\"type\":\"user\",\"cwd\":\"/repo\",\"timestamp\":\"2026-08-07T12:00:03Z\",\"message\":{\"role\":\"user\",\"content\":\"<local-command-stdout>Set model to Fable 5</local-command-stdout>\"}}\n",
+                "{\"type\":\"user\",\"cwd\":\"/repo\",\"timestamp\":\"2026-08-07T12:00:04Z\",\"message\":{\"role\":\"user\",\"content\":\"解除页面路由，只保留登录页面\"}}\n"
+            ),
+        )
+        .unwrap();
+        let started = parse_timestamp_ms("2026-08-07T12:00:00Z").unwrap();
+
+        let found = resolve_session_title_from_home(&home, "claude", repo, started, None, None)
+            .expect("the session must still match by its command rows' timestamps");
+        assert_eq!(found.session_id, "session-1");
+        assert_eq!(found.title.as_deref(), Some("解除页面路由，只保留登录页面"));
+
+        fs::remove_dir_all(home).unwrap();
+    }
+
+    /// Until a real prompt lands, a command-only session anchors with no title
+    /// so the caller keeps polling instead of freezing "<local-command-caveat…".
+    #[test]
+    fn claude_leaves_a_command_only_session_untitled() {
+        let home = temp_home();
+        let repo = "/repo";
+        let dir = home.join(".claude/projects/-repo");
+        fs::create_dir_all(&dir).unwrap();
+        fs::write(
+            dir.join("session-1.jsonl"),
+            concat!(
+                "{\"type\":\"user\",\"isMeta\":true,\"cwd\":\"/repo\",\"timestamp\":\"2026-08-07T12:00:01Z\",\"message\":{\"role\":\"user\",\"content\":\"<local-command-caveat>Caveat: local commands below.</local-command-caveat>\"}}\n",
+                "{\"type\":\"user\",\"cwd\":\"/repo\",\"timestamp\":\"2026-08-07T12:00:02Z\",\"message\":{\"role\":\"user\",\"content\":\"<command-name>/model</command-name>\"}}\n"
+            ),
+        )
+        .unwrap();
+        let started = parse_timestamp_ms("2026-08-07T12:00:00Z").unwrap();
+
+        let found = resolve_session_title_from_home(&home, "claude", repo, started, None, None)
+            .expect("the session itself must be identified");
+        assert_eq!(found.session_id, "session-1");
+        assert_eq!(found.title, None);
+
+        fs::remove_dir_all(home).unwrap();
+    }
+
+    /// A tab that just launched has no pid record yet, while a rival agent in
+    /// the same project is actively writing its transcript. With pid records
+    /// proven to exist, the resolver must wait for its own instead of claiming
+    /// the rival's session by "recently written".
+    #[test]
+    fn a_new_tab_must_not_claim_a_rival_agents_continued_session() {
+        let home = temp_home();
+        let repo = "/repo";
+        let dir = home.join(".claude/projects/-repo");
+        fs::create_dir_all(&dir).unwrap();
+        // Created days ago, but its mtime is "now": the rival is mid-task.
+        fs::write(
+            dir.join("rival.jsonl"),
+            concat!(
+                "{\"type\":\"mode\",\"sessionId\":\"rival\"}\n",
+                "{\"type\":\"user\",\"cwd\":\"/repo\",\"timestamp\":\"2026-08-01T09:00:00Z\",\"message\":{\"role\":\"user\",\"content\":\"The rival agent's prompt\"}}\n"
+            ),
+        )
+        .unwrap();
+        let sessions = home.join(".claude/sessions");
+        fs::create_dir_all(&sessions).unwrap();
+        // The rival's record, under a pid that is not in this tab's tree.
+        fs::write(
+            sessions.join("999999.json"),
+            "{\"pid\":999999,\"sessionId\":\"rival\",\"cwd\":\"/repo\",\"startedAt\":2}",
+        )
+        .unwrap();
+        let started = parse_timestamp_ms("2026-08-07T12:00:00Z").unwrap();
+
+        assert!(
+            resolve_session_title_from_home(
+                &home,
+                "claude",
+                repo,
+                started,
+                None,
+                Some(std::process::id()),
+            )
+            .is_none(),
+            "with pid records available the resolver must wait for its own record",
+        );
+
+        fs::remove_dir_all(home).unwrap();
+    }
+
+    /// The agent in the tab the user just closed leaves a transcript whose last
+    /// write still falls inside the launch tolerance, and a closed agent has no
+    /// pid record left to rule it out. The next tab used to wear that session's
+    /// title before its own agent had written a thing.
+    #[test]
+    fn a_new_tab_must_not_inherit_the_session_the_user_just_closed() {
+        use std::time::{Duration, SystemTime};
+
+        let home = temp_home();
+        let repo = "/repo";
+        let dir = home.join(".claude/projects/-repo");
+        fs::create_dir_all(&dir).unwrap();
+        let started = parse_timestamp_ms("2026-08-07T12:00:00Z").unwrap();
+        let path = dir.join("closed.jsonl");
+        fs::write(
+            &path,
+            concat!(
+                "{\"type\":\"mode\",\"sessionId\":\"closed\"}\n",
+                "{\"type\":\"user\",\"cwd\":\"/repo\",\"timestamp\":\"2026-08-07T11:00:00Z\",\"message\":{\"role\":\"user\",\"content\":\"The session that just ended\"}}\n"
+            ),
+        )
+        .unwrap();
+        // Its final write: two seconds before this tab opened.
+        fs::File::options()
+            .write(true)
+            .open(&path)
+            .unwrap()
+            .set_modified(SystemTime::UNIX_EPOCH + Duration::from_millis((started - 2_000) as u64))
+            .unwrap();
+
+        assert!(
+            resolve_session_title_from_home(&home, "claude", repo, started, None, None).is_none(),
+            "a session that stopped being written before this tab opened is not this tab's",
+        );
+
+        fs::remove_dir_all(home).unwrap();
+    }
+
+    /// Two agents opened seconds apart in one project. The new tab has no
+    /// transcript of its own until its first prompt lands, and its neighbour's
+    /// session — started just inside the launch tolerance — looks like a
+    /// perfect timestamp match. The tab used to adopt that title before the
+    /// user had typed anything, and keep it: the caller stops polling once a
+    /// title arrives.
+    #[cfg(target_os = "macos")]
+    #[test]
+    fn a_new_tab_must_not_adopt_the_session_of_the_agent_beside_it() {
+        let home = temp_home();
+        let repo = "/repo";
+        let dir = home.join(".claude/projects/-repo");
+        fs::create_dir_all(&dir).unwrap();
+        let sessions = home.join(".claude/sessions");
+        fs::create_dir_all(&sessions).unwrap();
+        let started = parse_timestamp_ms("2026-08-07T12:00:05Z").unwrap();
+
+        let transcript = |id: &str, at: &str, prompt: &str| {
+            fs::write(
+                dir.join(format!("{id}.jsonl")),
+                format!(
+                    concat!(
+                        "{{\"type\":\"mode\",\"sessionId\":\"{id}\"}}\n",
+                        "{{\"type\":\"user\",\"cwd\":\"/repo\",\"timestamp\":\"{at}\",",
+                        "\"message\":{{\"role\":\"user\",\"content\":\"{prompt}\"}}}}\n"
+                    ),
+                    id = id,
+                    at = at,
+                    prompt = prompt,
+                ),
+            )
+            .unwrap();
+        };
+        // The neighbour typed its opening prompt three seconds before this tab
+        // opened; this tab has typed nothing, so it has no transcript at all.
+        transcript("neighbour", "2026-08-07T12:00:02Z", "The other tab's prompt");
+
+        // The neighbour's agent is alive and outside this tab's process tree —
+        // this process's own parent stands in for it.
+        let rival_pid = parent_pid(std::process::id()).expect("the test process has a parent");
+        fs::write(
+            sessions.join(format!("{rival_pid}.json")),
+            format!(
+                "{{\"pid\":{rival_pid},\"sessionId\":\"neighbour\",\"cwd\":\"/repo\",\"startedAt\":{}}}",
+                started - 3_000
+            ),
+        )
+        .unwrap();
+
+        let agent_pid = std::process::id();
+        assert!(
+            resolve_session_title_from_home(&home, "claude", repo, started, None, Some(agent_pid))
+                .is_none(),
+            "a tab without a transcript of its own must stay untitled",
+        );
+
+        // Once this tab's own agent registers and its first prompt lands, the
+        // match is exact.
+        transcript("mine", "2026-08-07T12:00:09Z", "My own prompt");
+        fs::write(
+            sessions.join(format!("{agent_pid}.json")),
+            format!(
+                "{{\"pid\":{agent_pid},\"sessionId\":\"mine\",\"cwd\":\"/repo\",\"startedAt\":{}}}",
+                started + 1_000
+            ),
+        )
+        .unwrap();
+        let found =
+            resolve_session_title_from_home(&home, "claude", repo, started, None, Some(agent_pid))
+                .expect("the tab's own session must resolve");
+        assert_eq!(found.session_id, "mine");
+        assert_eq!(found.title.as_deref(), Some("My own prompt"));
 
         fs::remove_dir_all(home).unwrap();
     }

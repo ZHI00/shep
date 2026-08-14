@@ -56,12 +56,23 @@ export default function ContextMenu({ x, y, items, onClose }: ContextMenuProps) 
   }, [onClose]);
 
   return (
+    // Rendered into a portal, but React's synthetic events still bubble
+    // through the REACT tree into whatever row spawned this menu — clicking an
+    // item would also "click" that row. Contain them here, after the item
+    // handlers have run.
     <div
       ref={menuRef}
       className="context-menu"
       style={{ left: x, top: y }}
       role="menu"
       aria-label="Context menu"
+      onClick={(event) => event.stopPropagation()}
+      onPointerDown={(event) => event.stopPropagation()}
+      onKeyDown={(event) => event.stopPropagation()}
+      onContextMenu={(event) => {
+        event.preventDefault();
+        event.stopPropagation();
+      }}
     >
       {items.map((item, index) => {
         if (item.separator) {
@@ -234,6 +245,13 @@ const SubmenuPanel = forwardRef<HTMLDivElement, SubmenuPanelProps>(
         role="menu"
         onMouseEnter={onMouseEnter}
         onMouseLeave={onMouseLeave}
+        onClick={(event) => event.stopPropagation()}
+        onPointerDown={(event) => event.stopPropagation()}
+        onKeyDown={(event) => event.stopPropagation()}
+        onContextMenu={(event) => {
+          event.preventDefault();
+          event.stopPropagation();
+        }}
       >
         {items.map((child, i) => {
           if (child.separator) {

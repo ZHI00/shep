@@ -14,6 +14,7 @@ import {
   ChevronRight,
   ChevronDown,
   CircleX,
+  SquareTerminal,
 } from "lucide-react";
 import { createPortal } from "react-dom";
 import ContextMenu from "../shared/ContextMenu";
@@ -166,6 +167,14 @@ export default function ProjectItem({
   ];
 
   const menuItems: ContextMenuItem[] = [
+    {
+      // Same action as the row's + menu: starts the default assistant right
+      // away, or opens the picker when none is configured.
+      label: t("tab.newAgent"),
+      icon: <SquareTerminal size={14} />,
+      onClick: () => onProjectAction("assistant"),
+    },
+    { separator: true, label: "_sep_new_agent" },
     {
       label: editorActionLabel,
       icon: <SquareArrowOutUpRight size={14} />,

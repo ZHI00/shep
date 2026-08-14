@@ -4,6 +4,7 @@ import type { ShepTheme } from "../../lib/themes";
 import type { TerminalSettings } from "../../lib/types";
 import { resizePty } from "../../lib/tauri";
 import { buildCSSFontFamily } from "../../lib/terminalConfig";
+import { resolveSelectionBackground } from "../../lib/terminalSelection";
 import { preserveTerminalViewport } from "../../lib/terminalViewport";
 import { terminalCache } from "./terminalCache";
 import { reconcileTerminalRenderer } from "./terminalRenderer";
@@ -49,7 +50,7 @@ export function createTerminalTheme(theme: ShepTheme): ITheme {
     background: theme.isTransparent ? "transparent" : theme.appBg,
     foreground: theme.termForeground,
     cursor: theme.termCursor,
-    selectionBackground: theme.termSelection,
+    selectionBackground: resolveSelectionBackground(theme),
     scrollbarSliderBackground: withAlpha(theme.termForeground, 0.24),
     scrollbarSliderHoverBackground: withAlpha(theme.termForeground, 0.4),
     scrollbarSliderActiveBackground: withAlpha(theme.termForeground, 0.5),

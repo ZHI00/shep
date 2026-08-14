@@ -102,12 +102,19 @@ export default function ProjectActionMenu({
       </button>
 
       {open && createPortal(
+        // The DOM portal doesn't stop React's synthetic events: they bubble
+        // through the REACT tree, i.e. into the project row this menu is
+        // rendered under, whose onClick toggles expansion. Contain them here,
+        // after the item handlers have run.
         <div
           ref={menuRef}
           className="context-menu"
           style={position}
           role="menu"
           aria-label={label}
+          onClick={(event) => event.stopPropagation()}
+          onPointerDown={(event) => event.stopPropagation()}
+          onKeyDown={(event) => event.stopPropagation()}
         >
           {ACTIONS.map((action) => {
             const meta = tabKindMeta[action];
