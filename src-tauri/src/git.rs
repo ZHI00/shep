@@ -2,6 +2,13 @@ use std::collections::BTreeSet;
 use std::path::Path;
 use std::process::Command;
 
+/// Every git invocation goes through here so Windows never flashes a console
+/// window at the user (git runs on project open, on each file-watcher tick,
+/// and on every session start).
+fn git() -> Command {
+    crate::proc::command("git")
+}
+
 #[derive(serde::Serialize, Clone, Default)]
 pub struct GitStatus {
     pub is_git_repo: bool,
@@ -17,7 +24,7 @@ pub struct GitStatus {
 }
 
 pub fn status(path: &str) -> GitStatus {
-    let output = match Command::new("git")
+    let output = match git()
         .args(["-C", path, "status", "--porcelain=v2", "--branch"])
         .output()
     {
@@ -69,7 +76,7 @@ pub fn status(path: &str) -> GitStatus {
     let git_path = std::path::Path::new(path).join(".git");
     let worktree_parent = if git_path.is_file() {
         // This is a worktree — resolve the main repo path via git-common-dir
-        Command::new("git")
+        git()
             .args(["-C", path, "rev-parse", "--git-common-dir"])
             .output()
             .ok()
@@ -104,7 +111,7 @@ pub fn status(path: &str) -> GitStatus {
 }
 
 pub fn is_git_repo(path: &str) -> bool {
-    Command::new("git")
+    git()
         .args(["-C", path, "rev-parse", "--git-dir"])
         .output()
         .map(|o| o.status.success())
@@ -112,7 +119,7 @@ pub fn is_git_repo(path: &str) -> bool {
 }
 
 pub fn init_repo(path: &str) -> Result<(), String> {
-    let output = Command::new("git")
+    let output = git()
         .args(["-C", path, "init", "-b", "main"])
         .output()
         .map_err(|e| e.to_string())?;
@@ -123,7 +130,7 @@ pub fn init_repo(path: &str) -> Result<(), String> {
 
     let stderr = String::from_utf8_lossy(&output.stderr).to_string();
     if stderr.contains("unknown switch `b'") || stderr.contains("unknown option `b'") {
-        let fallback = Command::new("git")
+        let fallback = git()
             .args(["-C", path, "init"])
             .output()
             .map_err(|e| e.to_string())?;
@@ -139,7 +146,7 @@ pub fn init_repo(path: &str) -> Result<(), String> {
 }
 
 pub fn current_branch(path: &str) -> Result<String, String> {
-    let output = Command::new("git")
+    let output = git()
         .args(["-C", path, "branch", "--show-current"])
         .output()
         .map_err(|e| e.to_string())?;
@@ -152,7 +159,7 @@ pub fn current_branch(path: &str) -> Result<String, String> {
 }
 
 pub fn list_branches(path: &str) -> Result<Vec<String>, String> {
-    let output = Command::new("git")
+    let output = git()
         .args(["-C", path, "branch", "--format=%(refname:short)"])
         .output()
         .map_err(|e| e.to_string())?;
@@ -171,7 +178,7 @@ pub fn list_branches(path: &str) -> Result<Vec<String>, String> {
 }
 
 pub fn push_branch(path: &str, branch: &str) -> Result<(), String> {
-    let output = Command::new("git")
+    let output = git()
         .args(["-C", path, "push", "-u", "origin", branch])
         .output()
         .map_err(|e| e.to_string())?;
@@ -199,7 +206,7 @@ pub struct CreatedWorktree {
 }
 
 pub fn list_worktrees(path: &str) -> Result<Vec<WorktreeEntry>, String> {
-    let output = Command::new("git")
+    let output = git()
         .args(["-C", path, "worktree", "list", "--porcelain"])
         .output()
         .map_err(|e| e.to_string())?;
@@ -215,8 +222,7 @@ pub fn list_worktrees(path: &str) -> Result<Vec<WorktreeEntry>, String> {
 
     for line in stdout.lines() {
         if let Some(rest) = line.strip_prefix("worktree ") {
-            let canonical_path = Path::new(rest)
-                .canonicalize()
+            let canonical_path = crate::paths::canonicalize(rest)
                 .unwrap_or_else(|_| Path::new(rest).to_path_buf())
                 .to_string_lossy()
                 .to_string();
@@ -254,7 +260,7 @@ pub fn create_worktree(path: &str, branch_name: &str) -> Result<CreatedWorktree,
         return Err("Branch name is required".to_string());
     }
 
-    let validate = Command::new("git")
+    let validate = git()
         .args(["-C", path, "check-ref-format", "--branch", branch_name])
         .output()
         .map_err(|e| e.to_string())?;
@@ -270,7 +276,7 @@ pub fn create_worktree(path: &str, branch_name: &str) -> Result<CreatedWorktree,
     // Always derive the output path from the main repo, not the calling worktree,
     // so all worktrees end up in the same .shep-worktrees/<repo>/ directory.
     let main_repo_path = {
-        let out = Command::new("git")
+        let out = git()
             .args(["-C", path, "worktree", "list", "--porcelain"])
             .output()
             .map_err(|e| format!("Failed to list worktrees: {e}"))?;
@@ -319,7 +325,7 @@ pub fn create_worktree(path: &str, branch_name: &str) -> Result<CreatedWorktree,
     }
 
     let worktree_path_string = worktree_path.to_string_lossy().to_string();
-    let output = Command::new("git")
+    let output = git()
         .args(["-C", path, "worktree", "add", "-b", branch_name, &worktree_path_string])
         .output()
         .map_err(|e| e.to_string())?;
@@ -350,7 +356,7 @@ pub fn changed_files(path: &str) -> Result<Vec<ChangedFile>, String> {
     // single directory entry when a whole folder is untracked, and that
     // trailing-slash "folder" leaks into our file list. Gitignored files
     // inside the directory are still excluded.
-    let output = Command::new("git")
+    let output = git()
         .args([
             "-C",
             path,
@@ -496,7 +502,7 @@ fn decode_preview_bytes(bytes: Vec<u8>, file_path: &str) -> Result<String, Strin
 /// `.env`, `.env.*`, and `.envrc` files so common local config remains
 /// inspectable even when ignored by git.
 pub fn list_files(path: &str) -> Result<Vec<String>, String> {
-    let output = Command::new("git")
+    let output = git()
         .args([
             "-C",
             path,
@@ -566,7 +572,7 @@ pub fn file_contents(path: &str, file_path: &str, source: &str) -> Result<String
             } else {
                 format!("HEAD:{file_path}")
             };
-            let output = Command::new("git")
+            let output = git()
                 .args(["-C", path, "show", &spec])
                 .output()
                 .map_err(|e| e.to_string())?;
@@ -588,20 +594,20 @@ pub fn file_contents(path: &str, file_path: &str, source: &str) -> Result<String
 
 pub fn file_diff(path: &str, file_path: &str, staged: bool) -> Result<String, String> {
     let output = if staged {
-        Command::new("git")
+        git()
             .args(["-C", path, "diff", "--cached", "--", file_path])
             .output()
             .map_err(|e| e.to_string())?
     } else {
         // Try normal diff first
-        let result = Command::new("git")
+        let result = git()
             .args(["-C", path, "diff", "--", file_path])
             .output()
             .map_err(|e| e.to_string())?;
 
         if result.status.success() && result.stdout.is_empty() {
             // Might be untracked — use diff against /dev/null
-            Command::new("git")
+            git()
                 .args([
                     "-C",
                     path,
@@ -649,7 +655,7 @@ fn parse_numstat_line(line: &str, fallback_path: Option<&str>) -> Option<DiffFil
 /// --numstat` (all changes vs HEAD) so staged and unstaged changes are combined.
 /// Falls back to `--cached` on repos with no HEAD yet (first commit pending).
 pub fn diff_stats(path: &str) -> Result<Vec<DiffFileStat>, String> {
-    let output = Command::new("git")
+    let output = git()
         .args(["-C", path, "diff", "HEAD", "--numstat"])
         .output()
         .map_err(|e| e.to_string())?;
@@ -657,7 +663,7 @@ pub fn diff_stats(path: &str) -> Result<Vec<DiffFileStat>, String> {
     let stdout = if output.status.success() {
         String::from_utf8_lossy(&output.stdout).to_string()
     } else {
-        let cached = Command::new("git")
+        let cached = git()
             .args(["-C", path, "diff", "--cached", "--numstat"])
             .output()
             .map_err(|e| e.to_string())?;
@@ -676,7 +682,7 @@ pub fn diff_stats(path: &str) -> Result<Vec<DiffFileStat>, String> {
         .into_iter()
         .filter(|file| file.area == "untracked")
     {
-        let output = Command::new("git")
+        let output = git()
             .args([
                 "-C",
                 path,
@@ -705,7 +711,7 @@ pub fn diff_stats(path: &str) -> Result<Vec<DiffFileStat>, String> {
 }
 
 pub fn stage_file(path: &str, file_path: &str) -> Result<(), String> {
-    let output = Command::new("git")
+    let output = git()
         .args(["-C", path, "add", "--", file_path])
         .output()
         .map_err(|e| e.to_string())?;
@@ -718,7 +724,7 @@ pub fn stage_file(path: &str, file_path: &str) -> Result<(), String> {
 }
 
 pub fn stage_all(path: &str) -> Result<(), String> {
-    let output = Command::new("git")
+    let output = git()
         .args(["-C", path, "add", "-A"])
         .output()
         .map_err(|e| e.to_string())?;
@@ -731,7 +737,7 @@ pub fn stage_all(path: &str) -> Result<(), String> {
 }
 
 pub fn commit(path: &str, message: &str) -> Result<(), String> {
-    let output = Command::new("git")
+    let output = git()
         .args(["-C", path, "commit", "-m", message])
         .output()
         .map_err(|e| e.to_string())?;
@@ -744,7 +750,7 @@ pub fn commit(path: &str, message: &str) -> Result<(), String> {
 }
 
 pub fn unstage_file(path: &str, file_path: &str) -> Result<(), String> {
-    let output = Command::new("git")
+    let output = git()
         .args(["-C", path, "restore", "--staged", "--", file_path])
         .output()
         .map_err(|e| e.to_string())?;
@@ -757,7 +763,7 @@ pub fn unstage_file(path: &str, file_path: &str) -> Result<(), String> {
 }
 
 pub fn unstage_all(path: &str) -> Result<(), String> {
-    let output = Command::new("git")
+    let output = git()
         .args(["-C", path, "restore", "--staged", "."])
         .output()
         .map_err(|e| e.to_string())?;
@@ -770,7 +776,7 @@ pub fn unstage_all(path: &str) -> Result<(), String> {
 }
 
 pub fn switch_branch(path: &str, branch_name: &str) -> Result<(), String> {
-    let output = Command::new("git")
+    let output = git()
         .args(["-C", path, "switch", branch_name])
         .output()
         .map_err(|e| e.to_string())?;
@@ -783,7 +789,7 @@ pub fn switch_branch(path: &str, branch_name: &str) -> Result<(), String> {
 }
 
 pub fn create_branch(path: &str, branch_name: &str) -> Result<(), String> {
-    let output = Command::new("git")
+    let output = git()
         .args(["-C", path, "switch", "-c", branch_name])
         .output()
         .map_err(|e| e.to_string())?;

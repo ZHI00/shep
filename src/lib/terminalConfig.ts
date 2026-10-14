@@ -2,7 +2,24 @@ export const TERMINAL_FONT_SIZE = 14;
 export const TERMINAL_FONT_FAMILY = "MesloLGS NF";
 export const TERMINAL_LINE_HEIGHT = 1;
 
-const DEFAULT_FALLBACKS = ["MesloLGS NF", "Menlo", "Monaco", "Courier", "Andale Mono", "monospace"];
+// Latin monospace first (macOS, then Windows), then CJK. None of the monospace
+// fonts carry Han glyphs, and without a CJK family named here WebView2 falls
+// back to SimSun, a thin bitmap-era serif that looks broken next to Meslo.
+// xterm pins wide characters to two cells, so a proportional CJK face is fine.
+const DEFAULT_FALLBACKS = [
+  "MesloLGS NF",
+  "Menlo",
+  "Monaco",
+  "Cascadia Mono",
+  "Consolas",
+  "Courier",
+  "Andale Mono",
+  "PingFang SC",
+  "Microsoft YaHei UI",
+  "Microsoft YaHei",
+  "Noto Sans CJK SC",
+  "monospace",
+];
 const GENERIC_FAMILIES = new Set([
   "serif",
   "sans-serif",

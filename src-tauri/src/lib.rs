@@ -1,9 +1,15 @@
 mod agent_status;
 mod commands;
+#[cfg(target_os = "macos")]
+mod fonts;
+#[cfg(not(target_os = "macos"))]
+#[path = "fonts_stub.rs"]
 mod fonts;
 mod git;
 mod menu;
+mod paths;
 mod pi_config;
+mod proc;
 mod pty;
 mod session_history;
 mod session_titles;

@@ -96,13 +96,35 @@ pub fn backfill_global_config_defaults() -> Result<(), String> {
         fs::read_to_string(&path).map_err(|e| format!("Failed to read global config: {e}"))?;
     let needs_url_allowlist = !content.contains("urlAllowlist:");
 
-    if !needs_url_allowlist {
+    let mut config = load_global_config()?;
+    // Windows registration used to store verbatim paths (`\\?\D:\code\foo`),
+    // which cmd.exe rejects as a working directory. Rewrite them in place so
+    // existing projects don't have to be removed and re-added.
+    let simplified_repo_paths = simplify_repo_paths(&mut config);
+
+    if !needs_url_allowlist && !simplified_repo_paths {
         return Ok(());
     }
 
-    let mut config = load_global_config()?;
-    normalize_terminal_settings(&mut config.terminal);
+    if needs_url_allowlist {
+        normalize_terminal_settings(&mut config.terminal);
+    }
     save_global_config(&config)
+}
+
+/// Returns whether any repo path changed.
+fn simplify_repo_paths(config: &mut GlobalConfig) -> bool {
+    let mut changed = false;
+    for repo in &mut config.repos {
+        let simplified = crate::paths::simplified(PathBuf::from(&repo.path))
+            .to_string_lossy()
+            .to_string();
+        if simplified != repo.path {
+            repo.path = simplified;
+            changed = true;
+        }
+    }
+    changed
 }
 
 pub fn load_editor_settings() -> Result<EditorSettings, String> {
@@ -187,9 +209,8 @@ pub fn register_repo(repo_path: &str) -> Result<RegisteredRepo, String> {
 
     // Add to global config if not already there
     let mut config = load_global_config()?;
-    let canonical = path
-        .canonicalize()
-        .map_err(|e| format!("Failed to resolve path: {e}"))?;
+    let canonical =
+        crate::paths::canonicalize(path).map_err(|e| format!("Failed to resolve path: {e}"))?;
     let canonical_str = canonical.to_string_lossy().to_string();
 
     if !config.repos.iter().any(|r| r.path == canonical_str) {

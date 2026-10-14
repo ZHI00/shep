@@ -141,12 +141,38 @@ function detectClaude(screen: string, title: string): AgentScreenDetection {
     );
   }
 
-  if (/^[\u2800-\u28ff]\s/u.test(title) || /^\*+\s/.test(title)) {
+  // Claude's title spinner changed with the 2.x TUI: the braille and asterisk
+  // frames gave way to a rotating half-circle, and ✳ — once a working frame —
+  // now prefixes the *idle* title ("✳ Claude Code"). Match the working frames
+  // explicitly and keep the legacy ones so older CLIs still register.
+  if (/^(?:[\u25d0-\u25d3]|[\u2800-\u28ff]|\*+)\s/u.test(title)) {
     return matched(
       "working",
       "claude-working-title",
       "Claude's terminal title contains its working marker",
       title.trim(),
+    );
+  }
+
+  // The status row is the other working signal, and the only one left when a
+  // multiplexer owns the title. Its spinner cycles through ·✢✳✶✻✽ and its
+  // label is a gerund with an ellipsis — "✻ Ideating… (4s · ↓ 148 tokens · esc
+  // to interrupt)". The finished row reuses the same glyph ("✻ Churned for 5s
+  // · done 10:03 AM"), so the ellipsis, not the glyph, is what marks live work.
+  // Claude keeps its empty ❯ prompt on screen the whole time it works, so this
+  // has to run before that prompt is read as idle.
+  const workingRow = recent
+    .split("\n")
+    .find((line) => (
+      /^\s*[\u00b7\u2722-\u273f]\s+\p{L}[\p{L}\p{N}'’-]*…/u.test(line) ||
+      /\besc to interrupt\b/iu.test(line)
+    ));
+  if (workingRow) {
+    return matched(
+      "working",
+      "claude-working-row",
+      "Claude's live working row is visible",
+      workingRow.trim(),
     );
   }
 
@@ -220,9 +246,14 @@ function detectCodex(screen: string, title: string): AgentScreenDetection {
     );
   }
 
+  // Anchor on the interrupt hint, not the leading bullet: with codex's
+  // animations disabled (tui.animations = false) the status row renders
+  // without its •/◦/braille indicator, and the header word itself drifts
+  // ("Working", "Thinking", retry labels). The parenthesised hint is the one
+  // stable part of the row.
   const workingLine = recent
     .split("\n")
-    .find((line) => /^[•◦]\s+Working\s+\([^)]*esc to interrupt\)/iu.test(line.trim()));
+    .find((line) => /\([^)]*\besc to interrupt\)/iu.test(line));
   if (workingLine) {
     return matched(
       "working",

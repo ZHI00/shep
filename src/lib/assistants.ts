@@ -95,6 +95,20 @@ export function buildShellCommandLine(command: string, args: string[]): string {
   return [command, ...args].map(shellQuote).join(" ");
 }
 
+/**
+ * The same command line for PowerShell. A single-quoted string is literal
+ * there too (a quote is escaped by doubling it), but a quoted word in command
+ * position is just a string, so the call operator is needed to run it.
+ */
+export function buildPowerShellCommandLine(command: string, args: string[]): string {
+  const quote = (arg: string) =>
+    arg.length > 0 && /^[A-Za-z0-9_@%+=:,./\\-]+$/.test(arg)
+      ? arg
+      : `'${arg.replace(/'/g, "''")}'`;
+  const head = quote(command);
+  return [head === command ? head : `& ${head}`, ...args.map(quote)].join(" ");
+}
+
 /** Extra args the user wants on every launch of this assistant. */
 export function extraLaunchArgs(
   assistantId: string,

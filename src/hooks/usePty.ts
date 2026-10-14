@@ -27,10 +27,10 @@ import { useRepoStore } from "../stores/useRepoStore";
 import { useNoticeStore } from "../stores/useNoticeStore";
 import { useProjectSettingsStore } from "../stores/useProjectSettingsStore";
 import { useSessionRestoreStore } from "../stores/useSessionRestoreStore";
-import { buildShellCommandLine, extraLaunchArgs, resolveAssistant } from "../lib/assistants";
+import { buildPowerShellCommandLine, buildShellCommandLine, extraLaunchArgs, resolveAssistant } from "../lib/assistants";
 import type { Terminal } from "@xterm/xterm";
 import { getErrorMessage } from "../lib/errors";
-import { sessionResumeArgs } from "../lib/sessionResume";
+import { sessionResumeArgs, sessionResumeSlashCommand } from "../lib/sessionResume";
 import {
   clearTerminalPipelineCounters,
   recordPendingOutput,
@@ -73,6 +73,12 @@ const OUTPUT_ACK_INTERVAL_BYTES = 5_000;
 const OUTPUT_ACK_RETRY_MS = 250;
 const OUTPUT_TRUNCATED_MARKER = "\r\n[output truncated while terminal was unavailable]\r\n";
 const outputEncoder = new TextEncoder();
+
+// `-l` (login shell) is POSIX-only; PowerShell/cmd reject it.
+const IS_WINDOWS = navigator.userAgent.includes("Windows");
+function loginShellCommand(shell: string): string {
+  return IS_WINDOWS ? shell : `${shell} -l`;
+}
 
 const terminalInstances = new Map<number, TerminalRegistration>();
 const terminalTitles = new Map<number, string>();
@@ -169,9 +175,19 @@ export function explainAgentStatus(ptyId: number): AgentStatusExplain | null {
 
 if (import.meta.env.DEV) {
   const debugGlobal = globalThis as typeof globalThis & {
-    __shepAgentDetection?: { explain: typeof explainAgentStatus };
+    __shepAgentDetection?: {
+      explain: typeof explainAgentStatus;
+      explainAll: () => ({ ptyId: number } & AgentStatusExplain)[];
+    };
   };
-  debugGlobal.__shepAgentDetection = { explain: explainAgentStatus };
+  debugGlobal.__shepAgentDetection = {
+    explain: explainAgentStatus,
+    explainAll: () =>
+      [...agentStatusExplanations.entries()].map(([ptyId, explain]) => ({
+        ptyId,
+        ...explain,
+      })),
+  };
 }
 
 function stopAgentStatusObserver(ptyId: number) {
@@ -296,6 +312,106 @@ async function typeCommandIntoShell(ptyId: number, commandLine: string): Promise
   await writePty(ptyId, `${commandLine}\r`).catch(() => {
     // The tab still exists with a working shell — the user can retype it.
   });
+}
+
+/**
+ * Shell to spawn for an agent tab, plus the line still to be typed into it.
+ * On Windows the agent is handed to PowerShell as `-NoExit -Command` instead:
+ * PowerShell takes seconds to load its profile and goes quiet in between, so
+ * a typed line lands before PSReadLine is ready and is left sitting at the
+ * prompt unexecuted. `-NoExit` keeps the shell once the agent quits, same as
+ * the typed form.
+ *
+ * The command goes in as `-EncodedCommand`, not `-Command`: the backend runs
+ * everything through `cmd.exe /C`, and a `-Command "..."` argument reaches
+ * PowerShell with its quotes as `\"`, which cmd.exe leaves in place — so
+ * PowerShell sees a quoted string and just prints it. Base64 has no spaces or
+ * quotes for any layer to rewrite.
+ */
+/**
+ * Claude's input box is drawn: the `❯` prompt plus its footer hint line. Only
+ * then is the TUI reading keystrokes — anything typed while it is still
+ * booting is dropped, which is what made the old quiet-period guess lose
+ * `/resume` on slow starts.
+ */
+function claudePromptVisible(screen: string): boolean {
+  if (!/^\s*❯/mu.test(screen)) return false;
+  const lower = screen.toLowerCase();
+  return (
+    lower.includes("for shortcuts") ||
+    lower.includes("shift+tab") ||
+    lower.includes("bypass permissions") ||
+    lower.includes("try \"")
+  );
+}
+
+/**
+ * Waits for a launching agent to be ready for a typed slash command: its
+ * prompt is on screen and startup output (MCP servers, update notices) has
+ * gone quiet. Falls back to the quiet period alone when the screen can't be
+ * read, and gives up — returning false — if the agent never shows up.
+ */
+async function waitForAgentReady(ptyId: number, timeoutMs = 30000): Promise<boolean> {
+  const deadline = Date.now() + timeoutMs;
+  while (Date.now() < deadline) {
+    const activity = useTerminalStore.getState().tabActivity[ptyId];
+    if (activity && !activity.alive) return false;
+    const lastOutputAt = ptyLastOutputAt.get(ptyId);
+    const quiet = lastOutputAt !== undefined && Date.now() - lastOutputAt >= 400;
+    if (quiet) {
+      const registration = terminalInstances.get(ptyId);
+      if (!registration || claudePromptVisible(readTerminalBottomScreen(registration.term))) {
+        return true;
+      }
+    }
+    await new Promise((resolve) => setTimeout(resolve, 100));
+  }
+  return false;
+}
+
+/**
+ * Types a slash command into a running agent. Enter goes separately: sent in
+ * the same write, the TUI can take the whole burst as a paste and insert the
+ * newline instead of submitting.
+ */
+async function typeSlashCommand(ptyId: number, command: string): Promise<void> {
+  if (!(await waitForAgentReady(ptyId))) return;
+  try {
+    await writePty(ptyId, command);
+    await new Promise((resolve) => setTimeout(resolve, 150));
+    await writePty(ptyId, "\r");
+  } catch {
+    // The agent is up; the user can type /resume themselves.
+  }
+}
+
+/** `-EncodedCommand` payload: base64 of the UTF-16LE command text. */
+function encodePowerShellCommand(commandLine: string): string {
+  let binary = "";
+  for (let i = 0; i < commandLine.length; i += 1) {
+    const code = commandLine.charCodeAt(i);
+    binary += String.fromCharCode(code & 0xff, code >> 8);
+  }
+  return btoa(binary);
+}
+
+function agentShellLaunch(
+  shell: string,
+  command: string,
+  args: string[],
+): { command: string; args: string[] | null; typedLine: string | null } {
+  if (IS_WINDOWS) {
+    return {
+      command: shell,
+      args: ["-NoLogo", "-NoExit", "-EncodedCommand", encodePowerShellCommand(buildPowerShellCommandLine(command, args))],
+      typedLine: null,
+    };
+  }
+  return {
+    command: loginShellCommand(shell),
+    args: null,
+    typedLine: buildShellCommandLine(command, args),
+  };
 }
 
 function startAgentStatusObserver(
@@ -981,7 +1097,7 @@ export function usePty() {
       try {
         const shell = await getDefaultShell();
         const ptyId = await spawnSession(
-          `${shell} -l`,
+          loginShellCommand(shell),
           null,
           {},
           cols,
@@ -1058,9 +1174,10 @@ export function usePty() {
         // shell survives the agent exiting and the command stays visible in
         // the scrollback.
         const shell = await getDefaultShell();
+        const launch = agentShellLaunch(shell, assistant.command, commandArgs);
         const ptyId = await spawnSession(
-          `${shell} -l`,
-          null,
+          launch.command,
+          launch.args,
           {},
           cols,
           rows,
@@ -1083,7 +1200,7 @@ export function usePty() {
           labelSource: "default",
         });
 
-        void typeCommandIntoShell(ptyId, buildShellCommandLine(assistant.command, commandArgs));
+        if (launch.typedLine) void typeCommandIntoShell(ptyId, launch.typedLine);
         startSessionTitleResolver(ptyId, assistantId, repoPath, startedAfterMs, model);
         startAgentStatusObserver(ptyId, assistantId, repoPath);
 
@@ -1120,13 +1237,14 @@ export function usePty() {
       const assistant = resolveAssistant(session.provider, overrides);
       const mode = preferredMode ?? projectSettings.defaultAgentMode;
 
-      // The resume flag goes on the launch command itself. Typing it into the
-      // running agent instead would mean guessing when the agent is ready to
-      // read input, and anything sent while its runtime is still booting is
-      // silently dropped. Appending to the command is exact: the user's own
-      // command keeps its flags, and a shell alias still expands normally
-      // because the flag lands after the alias body.
-      const resumeArgs = sessionResumeArgs(session.provider, session.sessionId);
+      // Claude is started with exactly the configured command and resumed with
+      // `/resume <id>` once its prompt is up, so a wrapper command that drops
+      // extra args can't turn the resume into a fresh conversation. Providers
+      // without a known slash command get the resume flag on the command line.
+      const slashCommand = sessionResumeSlashCommand(session.provider, session.sessionId);
+      const resumeArgs = slashCommand
+        ? null
+        : sessionResumeArgs(session.provider, session.sessionId);
 
       const launchArgs: string[] = [...extraLaunchArgs(session.provider, overrides)];
       if (mode === "yolo" && assistant?.yoloFlag) {
@@ -1136,7 +1254,7 @@ export function usePty() {
         launchArgs.push(...resumeArgs);
       }
 
-      if (!assistant || !resumeArgs) {
+      if (!assistant || (!slashCommand && !resumeArgs)) {
         pushNotice({
           tone: "error",
           title: "Resume isn’t supported",
@@ -1149,9 +1267,10 @@ export function usePty() {
         const resumedAt = Date.now();
         // Same shape as a fresh launch: shell first, agent typed into it.
         const shell = await getDefaultShell();
+        const launch = agentShellLaunch(shell, assistant.command, launchArgs);
         const ptyId = await spawnSession(
-          `${shell} -l`,
-          null,
+          launch.command,
+          launch.args,
           {},
           cols,
           rows,
@@ -1160,7 +1279,10 @@ export function usePty() {
         );
         if (!ptyId) return null;
 
-        void typeCommandIntoShell(ptyId, buildShellCommandLine(assistant.command, launchArgs));
+        void (async () => {
+          if (launch.typedLine) await typeCommandIntoShell(ptyId, launch.typedLine);
+          if (slashCommand) await typeSlashCommand(ptyId, slashCommand);
+        })();
 
         addTab({
           id: nextTabId(),
@@ -1173,6 +1295,7 @@ export function usePty() {
           providerSessionId: session.sessionId,
           sessionMode: mode,
           labelSource: session.title ? "session" : "default",
+          resumed: true,
         });
 
         historyActivityWrites.set(ptyId, resumedAt);
@@ -1290,9 +1413,9 @@ export function usePty() {
       }
     }
 
-    for (const { tab } of closing) {
-      await shutdownSessionTab(tab);
-    }
+    // Kills run in parallel: each one waits out the backend's graceful-exit
+    // grace period, so closing N tabs serially took N× that long.
+    await Promise.all(closing.map(({ tab }) => shutdownSessionTab(tab)));
 
     useTerminalStore.getState().clearAllTabs();
     for (const { path, tab } of closing) {
@@ -1315,9 +1438,7 @@ export function usePty() {
         tab.kind === "terminal" || tab.kind === "assistant",
     );
 
-    for (const tab of closing) {
-      await shutdownSessionTab(tab);
-    }
+    await Promise.all(closing.map((tab) => shutdownSessionTab(tab)));
 
     useTerminalStore.getState().clearProjectSessionTabs(repoPath);
     useSessionRestoreStore.getState().forgetProject(repoPath);
@@ -1327,18 +1448,24 @@ export function usePty() {
     const state = useTerminalStore.getState();
     const tabs = state.getAllProjectTabs(repoPath);
 
-    for (const tab of tabs) {
-      if (tab.kind !== "terminal" && tab.kind !== "assistant") continue;
-      cleanupActivityState(tab.ptyId);
-      stopSessionTitleResolver(tab.ptyId);
-      stoppingPtys.add(tab.ptyId);
-      await killPty(tab.ptyId).catch(() => {
-        stoppingPtys.delete(tab.ptyId);
-      });
-      unregisterTerminal(tab.ptyId);
-      removeActivity(tab.ptyId);
-      await persistSessionActivity(tab.ptyId, true);
-    }
+    await Promise.all(
+      tabs
+        .filter(
+          (tab): tab is TerminalTabData =>
+            tab.kind === "terminal" || tab.kind === "assistant",
+        )
+        .map(async (tab) => {
+          cleanupActivityState(tab.ptyId);
+          stopSessionTitleResolver(tab.ptyId);
+          stoppingPtys.add(tab.ptyId);
+          await killPty(tab.ptyId).catch(() => {
+            stoppingPtys.delete(tab.ptyId);
+          });
+          unregisterTerminal(tab.ptyId);
+          removeActivity(tab.ptyId);
+          await persistSessionActivity(tab.ptyId, true);
+        }),
+    );
   }, [removeActivity]);
 
   return {

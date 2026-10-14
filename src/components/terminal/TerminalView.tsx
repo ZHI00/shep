@@ -36,6 +36,38 @@ import { useT } from "../../stores/useLanguageStore";
 import { useNoticeStore } from "../../stores/useNoticeStore";
 import { getErrorMessage } from "../../lib/errors";
 
+// Only the Mac gets Cmd+C/V for free from the native Edit menu. Elsewhere xterm
+// would turn Ctrl+C/V into ^C/^V, so the terminal binds them itself.
+const IS_MAC = navigator.userAgent.includes("Mac");
+
+// Clipboard goes through the Tauri plugin rather than navigator.clipboard:
+// WKWebView gates reads behind a native paste prompt.
+function copyText(text: string) {
+  writeText(text).catch((error) => {
+    useNoticeStore.getState().pushNotice({
+      tone: "error",
+      title: "Couldn't copy selection",
+      message: getErrorMessage(error),
+    });
+  });
+}
+
+function pasteInto(ptyId: number) {
+  readText()
+    .then((text) => {
+      // paste() honours bracketed-paste mode, so multi-line text lands
+      // intact in agent TUIs instead of being run line by line.
+      if (text) terminalCache.get(ptyId)?.term.paste(text);
+    })
+    .catch((error) => {
+      useNoticeStore.getState().pushNotice({
+        tone: "error",
+        title: "Couldn't paste from clipboard",
+        message: getErrorMessage(error),
+      });
+    });
+}
+
 interface TerminalViewProps {
   ptyId: number;
   visible: boolean;
@@ -46,7 +78,6 @@ export default function TerminalView({
   visible,
 }: TerminalViewProps) {
   const t = useT();
-  const pushNotice = useNoticeStore((s) => s.pushNotice);
   const containerRef = useRef<HTMLDivElement>(null);
   /** Right-click menu anchor, plus the selection captured when it opened. */
   const [menu, setMenu] = useState<{ x: number; y: number; selection: string } | null>(null);
@@ -179,6 +210,28 @@ export default function TerminalView({
 
     // Intercept key combos for custom keybindings
     term.attachCustomKeyEventHandler((ev) => {
+      // Windows/Linux conventions: Ctrl+Shift+C/V always copy/paste; plain
+      // Ctrl+C copies only while there is a selection (otherwise it stays an
+      // interrupt), and plain Ctrl+V pastes.
+      if (!IS_MAC && ev.ctrlKey && !ev.altKey && !ev.metaKey) {
+        const key = ev.key.toLowerCase();
+        const copy = key === "c" && (ev.shiftKey || term.hasSelection());
+        const paste = key === "v";
+        if (copy || paste) {
+          if (ev.type === "keydown") {
+            // Blocks the WebView's native paste so the text isn't inserted twice.
+            ev.preventDefault();
+            if (copy) {
+              copyText(term.getSelection());
+              if (!ev.shiftKey) term.clearSelection();
+            } else {
+              pasteInto(ptyId);
+            }
+          }
+          return false;
+        }
+      }
+
       const settings = useKeybindingStore.getState().settings;
       for (const preset of KEYBINDING_PRESETS) {
         if (settings[preset.id] && preset.match(ev)) {
@@ -218,42 +271,18 @@ export default function TerminalView({
     terminalCache.get(ptyId)?.term.focus();
   }, [ptyId]);
 
-  // Clipboard goes through the Tauri plugin rather than navigator.clipboard:
-  // WKWebView gates reads behind a native paste prompt.
   const menuItems: ContextMenuItem[] = [
     ...(menu?.selection
       ? [{
           label: t("terminal.copy"),
           icon: <Copy size={14} />,
-          onClick: () => {
-            writeText(menu.selection).catch((error) => {
-              pushNotice({
-                tone: "error",
-                title: "Couldn't copy selection",
-                message: getErrorMessage(error),
-              });
-            });
-          },
+          onClick: () => copyText(menu.selection),
         }]
       : []),
     {
       label: t("terminal.paste"),
       icon: <ClipboardPaste size={14} />,
-      onClick: () => {
-        readText()
-          .then((text) => {
-            // paste() honours bracketed-paste mode, so multi-line text lands
-            // intact in agent TUIs instead of being run line by line.
-            if (text) terminalCache.get(ptyId)?.term.paste(text);
-          })
-          .catch((error) => {
-            pushNotice({
-              tone: "error",
-              title: "Couldn't paste from clipboard",
-              message: getErrorMessage(error),
-            });
-          });
-      },
+      onClick: () => pasteInto(ptyId),
     },
     { separator: true, label: "_sep_view" },
     {

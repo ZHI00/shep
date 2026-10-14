@@ -79,6 +79,15 @@ export default function Sidebar({
         if (activity && !activity.alive && activity.exitCode === 0) continue;
         sessions.push(tab);
       }
+      // Fresh launches on top, newest first — PTY ids are allocated
+      // sequentially per spawn, so they double as launch order without
+      // storing a timestamp. Resuming a dormant session reopens an old
+      // conversation without starting a task, so those stay below the
+      // launches in the order they were brought back (sort is stable).
+      sessions.sort((a, b) => {
+        if (!a.resumed !== !b.resumed) return a.resumed ? 1 : -1;
+        return a.resumed ? 0 : b.ptyId - a.ptyId;
+      });
       if (sessions.length > 0) byRepo[repoPath] = sessions;
     }
     return byRepo;

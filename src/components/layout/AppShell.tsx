@@ -49,6 +49,20 @@ const LAST_REPO_STORAGE_KEY = "shep:last-repo-path";
 // useSyncExternalStore — selectors must return the same reference for the same state.
 const EMPTY_TABS: UnifiedTab[] = [];
 const EMPTY_COMMANDS: CommandState[] = [];
+
+const IS_MAC = navigator.userAgent.includes("Mac");
+
+// Ctrl equivalents of the macOS menu accelerators, for the platforms that carry
+// no native menu. Ctrl+C/V are deliberately absent — the terminal owns those.
+const CTRL_SHORTCUTS: { key: string; shift: boolean; id: string }[] = [
+  { key: "t", shift: false, id: "new_terminal" },
+  { key: "t", shift: true, id: "new_agent" },
+  { key: "c", shift: true, id: "new_commands" },
+  { key: "g", shift: false, id: "new_git" },
+  { key: "e", shift: false, id: "open_in_editor" },
+  { key: "b", shift: false, id: "toggle_sidebar" },
+  { key: ",", shift: false, id: "settings" },
+];
 const SettingsPanel = lazy(() => import("../settings/SettingsPanel"));
 const GitPanel = lazy(() => import("../git/GitPanel"));
 const CommandsPanel = lazy(() => import("../commands/CommandsPanel"));
@@ -411,17 +425,23 @@ export default function AppShell() {
 
   const handleSelectSidebarProjectTab = useCallback(async (repoPath: string, tabId: string) => {
     useUIStore.getState().deactivateAllOverlays();
-    if (repoPath !== activeRepoPath) {
-      await handleSelectRepo(repoPath);
-    }
 
     const store = useTerminalStore.getState();
     // Selecting a detached session brings it back into the tab bar.
     store.attachTab(tabId);
-    store.setActiveTab(tabId);
+    // Activate the clicked tab before switching projects. switchProject treats
+    // the target project's remembered active tab as about-to-be-viewed and
+    // clears its done marker — if the remembered tab is a different finished
+    // session, that would silently swallow its state, so the clicked tab must
+    // already be the remembered one by the time the switch happens.
+    store.setActiveTab(tabId, repoPath);
     const tab = store.projectState[repoPath]?.tabs.find((entry) => entry.id === tabId);
     if (tab && (tab.kind === "terminal" || tab.kind === "assistant")) {
       store.clearTabBell(tab.ptyId);
+    }
+
+    if (repoPath !== activeRepoPath) {
+      await handleSelectRepo(repoPath);
     }
   }, [activeRepoPath, handleSelectRepo]);
 
@@ -784,37 +804,66 @@ export default function AppShell() {
     return () => { unlisten.then((f) => f()); };
   }, []);
 
+  const runMenuAction = useCallback((id: string) => {
+    switch (id) {
+      case "new_terminal":
+        handleNewShell();
+        break;
+      case "new_agent":
+        handleNewAssistant();
+        break;
+      case "new_commands":
+        useTerminalStore.getState().addPanelTab("commands");
+        break;
+      case "new_git":
+        useTerminalStore.getState().addPanelTab("git");
+        break;
+      case "toggle_sidebar":
+        useUIStore.getState().toggleSidebar();
+        break;
+      case "open_in_editor": {
+        const repoPath = useTerminalStore.getState().activeProjectPath;
+        if (repoPath) handleOpenInEditor(repoPath);
+        break;
+      }
+      case "settings":
+        useUIStore.getState().toggleSettings();
+        break;
+    }
+  }, [handleNewShell, handleNewAssistant, handleOpenInEditor]);
+
   // Handle native menu events (accelerators for Cmd+T, Cmd+Shift+T, Cmd+B, Cmd+E, Cmd+, etc.)
   useEffect(() => {
-    const unlisten = listen<string>("menu-event", (event) => {
-      switch (event.payload) {
-        case "new_terminal":
-          handleNewShell();
-          break;
-        case "new_agent":
-          handleNewAssistant();
-          break;
-        case "new_commands":
-          useTerminalStore.getState().addPanelTab("commands");
-          break;
-        case "new_git":
-          useTerminalStore.getState().addPanelTab("git");
-          break;
-        case "toggle_sidebar":
-          useUIStore.getState().toggleSidebar();
-          break;
-        case "open_in_editor": {
-          const repoPath = useTerminalStore.getState().activeProjectPath;
-          if (repoPath) handleOpenInEditor(repoPath);
-          break;
-        }
-        case "settings":
-          useUIStore.getState().toggleSettings();
-          break;
-      }
-    });
+    const unlisten = listen<string>("menu-event", (event) => runMenuAction(event.payload));
     return () => { unlisten.then((f) => f()); };
-  }, [handleNewShell, handleNewAssistant, handleOpenInEditor, pushNotice]);
+  }, [runMenuAction]);
+
+  // Windows and Linux get no native menu bar (see src-tauri/src/menu.rs), so the
+  // accelerators it would have carried are bound here. Capture phase, because the
+  // focused terminal would otherwise swallow the combo before it bubbles.
+  useEffect(() => {
+    if (IS_MAC) return;
+    const handleShortcut = (event: KeyboardEvent) => {
+      if (!event.ctrlKey || event.metaKey || event.altKey) return;
+      const key = event.key.toLowerCase();
+      const match = CTRL_SHORTCUTS.find(
+        (s) => s.key === key && s.shift === event.shiftKey,
+      );
+      if (!match) return;
+      // Inside a terminal Ctrl+Shift+C is copy, as in every Windows/Linux
+      // terminal; TerminalView handles it.
+      if (
+        match.id === "new_commands" &&
+        event.target instanceof Element &&
+        event.target.closest(".xterm")
+      ) return;
+      event.preventDefault();
+      event.stopPropagation();
+      runMenuAction(match.id);
+    };
+    window.addEventListener("keydown", handleShortcut, { capture: true });
+    return () => window.removeEventListener("keydown", handleShortcut, { capture: true });
+  }, [runMenuAction]);
 
   const showOverlay = settingsActive || usagePanelActive || portsPanelActive || historyPanelActive;
 

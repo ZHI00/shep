@@ -304,8 +304,18 @@ pub fn resize_pty(
 }
 
 #[tauri::command]
-pub fn kill_pty(pty_id: u32, pty_manager: State<'_, PtyManager>) -> Result<(), String> {
-    pty_manager.kill(pty_id)
+pub async fn kill_pty(pty_id: u32, pty_manager: State<'_, PtyManager>) -> Result<(), String> {
+    // Async + spawn_blocking: a kill blocks ~100ms (graceful-exit grace
+    // period) plus a process-tree walk, and a sync command would spend that
+    // time on the main thread freezing the UI. Taking the session out of the
+    // manager first also means concurrent kills don't serialize on its lock.
+    let session = pty_manager.take(pty_id);
+    tauri::async_runtime::spawn_blocking(move || match session {
+        Some(mut session) => session.kill(),
+        None => Ok(()),
+    })
+    .await
+    .map_err(|e| format!("Kill task failed: {e}"))?
 }
 
 #[tauri::command]
@@ -522,7 +532,9 @@ pub async fn git_diff_stats(path: String) -> Result<Vec<DiffFileStat>, String> {
 
 #[tauri::command]
 pub fn get_username() -> String {
-    std::env::var("USER").unwrap_or_default()
+    std::env::var("USER")
+        .or_else(|_| std::env::var("USERNAME"))
+        .unwrap_or_default()
 }
 
 #[tauri::command]
@@ -534,11 +546,17 @@ pub fn get_home_directory() -> Result<String, String> {
 
 #[tauri::command]
 pub fn get_default_shell() -> String {
+    #[cfg(windows)]
+    return "powershell.exe".to_string();
+    #[cfg(not(windows))]
     std::env::var("SHELL").unwrap_or_else(|_| "/bin/zsh".to_string())
 }
 
 #[tauri::command]
 pub fn get_computer_name() -> String {
+    #[cfg(windows)]
+    return std::env::var("COMPUTERNAME").unwrap_or_default();
+    #[cfg(not(windows))]
     Command::new("scutil")
         .args(["--get", "ComputerName"])
         .output()
@@ -613,7 +631,10 @@ pub fn remove_skill(repo_path: &str, name: &str) -> Result<(), String> {
 
 #[tauri::command]
 pub fn check_command_exists(command: &str) -> bool {
-    Command::new("which")
+    // `which` is a unix tool; Windows ships `where.exe`, which also honours
+    // PATHEXT so `claude` finds `claude.cmd`.
+    let probe = if cfg!(windows) { "where" } else { "which" };
+    crate::proc::command(probe)
         .arg(command)
         .output()
         .map(|o| o.status.success())
@@ -698,7 +719,7 @@ fn query_cli_models(
     args: &[&str],
     parser: fn(&str) -> Vec<String>,
 ) -> Vec<String> {
-    let mut child = match Command::new(cmd)
+    let mut child = match crate::proc::command(cmd)
         .args(args)
         .stdout(Stdio::piped())
         .stderr(Stdio::null())
@@ -903,7 +924,7 @@ pub struct PortInfo {
 /// failure or timeout. Prevents hangs from stalling the app (e.g. NFS mounts,
 /// broken pipes). Matches port-whisperer's 5-10s timeout pattern.
 fn run_with_timeout(cmd: &str, args: &[&str], timeout: std::time::Duration) -> String {
-    let mut child = match Command::new(cmd).args(args)
+    let mut child = match crate::proc::command(cmd).args(args)
         .stdout(std::process::Stdio::piped())
         .stderr(std::process::Stdio::null())
         .spawn() {

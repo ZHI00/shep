@@ -87,13 +87,11 @@ impl PtyManager {
         session.resize(cols, rows)
     }
 
-    pub fn kill(&self, pty_id: u32) -> Result<(), String> {
-        let mut sessions = self.sessions.lock().unwrap();
-        if let Some(mut session) = sessions.remove(&pty_id) {
-            session.kill()
-        } else {
-            Ok(())
-        }
+    /// Removes the session from the map so the caller can kill it without
+    /// holding the lock — a kill sleeps 100ms waiting for graceful exit, and
+    /// keeping the map locked that long stalls every other PTY operation.
+    pub fn take(&self, pty_id: u32) -> Option<PtySession> {
+        self.sessions.lock().unwrap().remove(&pty_id)
     }
 
     pub fn child_pids(&self) -> Vec<u32> {
@@ -109,9 +107,22 @@ impl PtyManager {
     }
 
     pub fn kill_all(&self) {
-        let mut sessions = self.sessions.lock().unwrap();
-        for (_, mut session) in sessions.drain() {
-            let _ = session.kill();
+        let sessions: Vec<PtySession> = {
+            let mut map = self.sessions.lock().unwrap();
+            map.drain().map(|(_, session)| session).collect()
+        };
+        // Each kill sleeps 100ms for graceful exit; killing in parallel keeps
+        // app shutdown at ~one grace period instead of one per session.
+        let handles: Vec<_> = sessions
+            .into_iter()
+            .map(|mut session| {
+                std::thread::spawn(move || {
+                    let _ = session.kill();
+                })
+            })
+            .collect();
+        for handle in handles {
+            let _ = handle.join();
         }
     }
 }

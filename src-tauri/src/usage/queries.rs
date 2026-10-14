@@ -279,7 +279,7 @@ fn resolve_path_alias(path: PathBuf) -> Option<ProjectAliasResolution> {
     } else {
         path
     };
-    let canonical_path = expanded.canonicalize().ok()?;
+    let canonical_path = crate::paths::canonicalize(expanded).ok()?;
     let git_root = find_git_root(canonical_path.clone());
     let canonical_id_path = git_root.as_ref().unwrap_or(&canonical_path);
     Some(ProjectAliasResolution {

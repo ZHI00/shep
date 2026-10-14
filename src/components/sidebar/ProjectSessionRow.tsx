@@ -1,6 +1,6 @@
 import { useCallback, useState } from "react";
 import { createPortal } from "react-dom";
-import { X } from "lucide-react";
+import { Eye, EyeOff, X } from "lucide-react";
 import type { TabActivity, TerminalTabData } from "../../lib/types";
 import { assistantLogoSrc, getAssistantLogoClass } from "../../lib/assistantLogos";
 import { handleActionKey } from "../../lib/a11y";
@@ -106,7 +106,7 @@ export default function ProjectSessionRow({
   return (
     <>
     <div
-      className={`project-session-row ${isActive ? "project-session-row--active" : ""}`}
+      className={`project-session-row ${isActive ? "project-session-row--active" : ""}${tab.flagged ? " project-session-row--flagged" : ""}`}
       onClick={onSelect}
       onContextMenu={handleContextMenu}
       onKeyDown={(event) => handleActionKey(event, onSelect)}
@@ -137,6 +137,13 @@ export default function ProjectSessionRow({
         x={menu.x}
         y={menu.y}
         items={[
+          {
+            label: tab.flagged ? t("session.unflag") : t("session.flag"),
+            icon: tab.flagged ? <EyeOff size={14} /> : <Eye size={14} />,
+            onClick: () =>
+              useTerminalStore.getState().setTabFlagged(tab.id, !tab.flagged),
+          },
+          { separator: true, label: "_sep_flag" },
           {
             label: t("session.close"),
             icon: <X size={14} />,

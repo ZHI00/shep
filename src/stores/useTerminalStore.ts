@@ -26,8 +26,11 @@ interface TerminalStore {
   clearProjectSessionTabs: (repoPath: string) => void;
   detachTab: (id: string) => void;
   attachTab: (id: string) => void;
-  setActiveTab: (id: string) => void;
+  /** Activates a tab in `repoPath` (defaults to the active project). */
+  setActiveTab: (id: string, repoPath?: string) => void;
   updateTab: (id: string, patch: Partial<Pick<UnifiedTab, "label">>) => void;
+  /** Sets or clears a session tab's "to watch" mark, in any project. */
+  setTabFlagged: (id: string, flagged: boolean) => void;
   setTabTitleFromPty: (ptyId: number, title: string) => void;
   setTabSessionInfo: (ptyId: number, sessionId: string, title: string | null) => void;
   reorderTab: (tabId: string, toIndex: number) => void;
@@ -104,19 +107,24 @@ function looksLikeCommandName(title: string): boolean {
   return title.length <= 24 && /^[A-Za-z0-9._\-/]+$/.test(title);
 }
 
+/**
+ * Claude prefixes its OSC title with a status marker: `*` on older CLIs, and on
+ * 2.x either ✳ once it is idle or a rotating half-circle while it works. None
+ * of it belongs in the persistent tab label.
+ */
+const CLAUDE_TITLE_MARKER = /^[*\u2733\u25d0-\u25d3]+\s*/u;
+
 function usefulPtyTitle(tab: TerminalTabData, title: string): string | null {
   const project = projectName(tab.repoPath);
 
   // Plain terminals are expected to be named after what they run; only agent
   // tabs, which carry a conversation, are protected from that.
-  if (tab.kind === "assistant" && looksLikeCommandName(title.replace(/^\*+\s*/, "").trim())) {
+  if (tab.kind === "assistant" && looksLikeCommandName(title.replace(CLAUDE_TITLE_MARKER, "").trim())) {
     return null;
   }
 
   if (tab.assistantId === "claude") {
-    // Claude prefixes its OSC title with `*` while it is actively working.
-    // Keep that transient status marker out of the persistent tab label.
-    return normalizeTerminalTitle(title.replace(/^\*+\s*/, ""));
+    return normalizeTerminalTitle(title.replace(CLAUDE_TITLE_MARKER, ""));
   }
 
   if (tab.assistantId === "pi") {
@@ -332,9 +340,9 @@ export const useTerminalStore = create<TerminalStore>((set, get) => ({
     });
   },
 
-  setActiveTab: (id: string) => {
+  setActiveTab: (id: string, repoPath?: string) => {
     set((state) => {
-      const path = state.activeProjectPath;
+      const path = repoPath ?? state.activeProjectPath;
       if (!path) return state;
       const ps = state.projectState[path];
       if (!ps || !ps.tabs.some((t) => t.id === id)) return state;
@@ -383,6 +391,28 @@ export const useTerminalStore = create<TerminalStore>((set, get) => ({
           },
         },
       };
+    });
+  },
+
+  setTabFlagged: (id: string, flagged: boolean) => {
+    set((state) => {
+      // Searches every project: the sidebar shows sessions of collapsed,
+      // non-active projects too, and flagging one must work from there.
+      for (const [path, project] of Object.entries(state.projectState)) {
+        const index = project.tabs.findIndex((tab) => tab.id === id);
+        if (index === -1) continue;
+        const tab = project.tabs[index];
+        if (tab.kind !== "terminal" && tab.kind !== "assistant") return state;
+        const tabs = [...project.tabs];
+        tabs[index] = { ...tab, flagged };
+        return {
+          projectState: {
+            ...state.projectState,
+            [path]: { ...project, tabs },
+          },
+        };
+      }
+      return state;
     });
   },
 

@@ -2,6 +2,8 @@ use portable_pty::{native_pty_system, ChildKiller, CommandBuilder, MasterPty, Pt
 use serde::{Deserialize, Serialize};
 use std::collections::HashMap;
 use std::io::{Read, Write};
+use std::path::PathBuf;
+#[cfg(unix)]
 use std::process::Command;
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::mpsc::{sync_channel, Receiver, RecvTimeoutError};
@@ -464,24 +466,32 @@ fn decode_utf8_chunks(pending: &mut Vec<u8>, incoming: &[u8]) -> Vec<String> {
 }
 
 /// Find all descendant PIDs of the given root PID by walking the process tree.
-/// Uses `pgrep -P <pid>` to find direct children, then recurses.
+/// Snapshots the whole pid/ppid table with one `ps` call — one fork total,
+/// where a `pgrep -P` per process made killing a deep tree take seconds.
+#[cfg(unix)]
 fn get_all_descendants(root_pid: i32) -> Vec<i32> {
+    let Ok(output) = Command::new("ps").args(["-axo", "pid=,ppid="]).output() else {
+        return Vec::new();
+    };
+
+    let mut children_of: HashMap<i32, Vec<i32>> = HashMap::new();
+    for line in String::from_utf8_lossy(&output.stdout).lines() {
+        let mut fields = line.split_whitespace();
+        if let (Some(pid), Some(ppid)) = (fields.next(), fields.next()) {
+            if let (Ok(pid), Ok(ppid)) = (pid.parse(), ppid.parse()) {
+                children_of.entry(ppid).or_default().push(pid);
+            }
+        }
+    }
+
     let mut descendants = Vec::new();
     let mut queue = vec![root_pid];
-
     while let Some(parent) = queue.pop() {
-        if let Ok(output) = Command::new("pgrep")
-            .arg("-P")
-            .arg(parent.to_string())
-            .output()
-        {
-            let stdout = String::from_utf8_lossy(&output.stdout);
-            for line in stdout.lines() {
-                if let Ok(pid) = line.trim().parse::<i32>() {
-                    if !descendants.contains(&pid) {
-                        descendants.push(pid);
-                        queue.push(pid);
-                    }
+        if let Some(kids) = children_of.get(&parent) {
+            for &pid in kids {
+                if !descendants.contains(&pid) {
+                    descendants.push(pid);
+                    queue.push(pid);
                 }
             }
         }
@@ -525,22 +535,51 @@ impl PtySession {
             })
             .map_err(|e| format!("Failed to open PTY: {e}"))?;
 
-        let shell = std::env::var("SHELL").unwrap_or_else(|_| "/bin/zsh".to_string());
-        let mut cmd = CommandBuilder::new(&shell);
-        cmd.arg("-l");
-        cmd.arg("-i");
-        cmd.arg("-c");
-        if let Some(args) = args {
-            cmd.arg("exec \"$@\"");
-            cmd.arg("shep");
-            cmd.arg(command);
-            for arg in args {
-                cmd.arg(arg);
+        #[cfg(unix)]
+        let mut cmd = {
+            let shell = std::env::var("SHELL").unwrap_or_else(|_| "/bin/zsh".to_string());
+            let mut cmd = CommandBuilder::new(&shell);
+            cmd.arg("-l");
+            cmd.arg("-i");
+            cmd.arg("-c");
+            if let Some(args) = args {
+                cmd.arg("exec \"$@\"");
+                cmd.arg("shep");
+                cmd.arg(command);
+                for arg in args {
+                    cmd.arg(arg);
+                }
+            } else {
+                cmd.arg(command);
             }
-        } else {
-            cmd.arg(command);
-        }
-        cmd.cwd(cwd);
+            cmd
+        };
+        // Windows has no login-shell wrapper to preserve; hand the command
+        // line to cmd.exe, which is what a user double-clicking a .bat gets.
+        #[cfg(windows)]
+        let mut cmd = {
+            let comspec = std::env::var("COMSPEC").unwrap_or_else(|_| "cmd.exe".to_string());
+            let mut cmd = CommandBuilder::new(&comspec);
+            cmd.arg("/C");
+            let mut line = command.to_string();
+            if let Some(args) = args {
+                for arg in args {
+                    line.push(' ');
+                    if arg.contains(' ') {
+                        line.push('"');
+                        line.push_str(&arg);
+                        line.push('"');
+                    } else {
+                        line.push_str(&arg);
+                    }
+                }
+            }
+            cmd.arg(line);
+            cmd
+        };
+        // Sessions restored from an older config can still carry a verbatim
+        // Windows path; cmd.exe would drop to the Windows directory instead.
+        cmd.cwd(crate::paths::simplified(PathBuf::from(cwd)));
 
         // Strip markers that say "you are running inside an agent session".
         // Shep may itself have been launched from one (an agent starting the
@@ -730,6 +769,7 @@ impl PtySession {
         self.alive.store(false, Ordering::SeqCst);
         self.output_flow.wake();
 
+        #[cfg(unix)]
         if let Some(pid) = self.child_pid {
             let pid = pid as i32;
 
@@ -766,6 +806,15 @@ impl PtySession {
                     libc::kill(pid, libc::SIGKILL);
                 }
             }
+        }
+
+        // taskkill /T walks the child tree the way the signal fan-out above
+        // does on unix; /F because ConPTY children get no graceful signal.
+        #[cfg(windows)]
+        if let Some(pid) = self.child_pid {
+            let _ = crate::proc::command("taskkill")
+                .args(["/F", "/T", "/PID", &pid.to_string()])
+                .output();
         }
 
         self.killer

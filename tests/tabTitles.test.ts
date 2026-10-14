@@ -66,6 +66,14 @@ test("the working marker is stripped from an adopted title", () => {
   assert.equal(currentLabel(), "Fixing the resume flow");
 });
 
+test("Claude 2.x status markers are stripped too", () => {
+  for (const title of ["✳ Fixing the resume flow", "◐ Fixing the resume flow"]) {
+    seedAgentTab("Claude Code", "default");
+    useTerminalStore.getState().setTabTitleFromPty(PTY, title);
+    assert.equal(currentLabel(), "Fixing the resume flow", `not stripped from ${title}`);
+  }
+});
+
 test("a plain terminal is still named after what it runs", () => {
   const tab: UnifiedTab = {
     id: "tab-2",

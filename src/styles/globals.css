@@ -229,7 +229,7 @@ select {
   bottom: 6px;
   width: 3px;
   border-radius: 1px;
-  background: color-mix(in srgb, var(--overlay) 40%, transparent);
+  background: color-mix(in srgb, var(--accent, #7aa2f7) 85%, transparent);
 }
 
 /* Context menu (right-click) */
@@ -1169,8 +1169,15 @@ select {
 .project-row:hover {
   background: color-mix(in srgb, var(--overlay) 5%, transparent);
 }
+/* Active project reads at a glance: taller row, accent-tinted background,
+   bolder name — the accent edge bar comes from .list-item.project-active. */
 .project-row.project-active {
-  background: color-mix(in srgb, var(--overlay) 9%, transparent);
+  min-height: 38px;
+  background: color-mix(in srgb, var(--accent, #7aa2f7) 12%, transparent);
+}
+.project-row.project-active .project-row__name {
+  font-weight: 600;
+  color: var(--text-primary);
 }
 
 /* Chevron is its own button so expanding never changes the selection. */
@@ -1271,6 +1278,22 @@ select {
 .project-session-row__logo {
   flex-shrink: 0;
   opacity: 0.85;
+}
+
+/* Flagged "to watch": amber wash + amber name so it survives any list length.
+   Layered after --active so the tint shows on the selected row too. */
+.project-session-row--flagged {
+  background: color-mix(in srgb, var(--status-attention) 10%, transparent);
+}
+.project-session-row--flagged:hover {
+  background: color-mix(in srgb, var(--status-attention) 16%, transparent);
+}
+.project-session-row--flagged.project-session-row--active {
+  background: color-mix(in srgb, var(--status-attention) 20%, transparent);
+}
+.project-session-row--flagged .project-session-row__label {
+  color: var(--status-attention);
+  font-weight: 500;
 }
 
 /* Carried over from the last run — nothing is running behind it yet. */
@@ -2791,6 +2814,35 @@ select {
 }
 
 /* ── Scrollbars ────────────────────────────────────────── */
+/* Global default for every scroller without a bespoke rule below (sidebar,
+   tab bar, panels styled with utility classes): slim and quiet instead of
+   WebKit's wide grey classic bar. The class-specific group further down wins
+   on specificity, so xterm keeps its measured 12px. */
+::-webkit-scrollbar {
+  width: 8px;
+  height: 8px;
+}
+::-webkit-scrollbar-track {
+  background: transparent;
+}
+::-webkit-scrollbar-thumb {
+  background-color: color-mix(in srgb, var(--overlay) 16%, transparent);
+  border: 2px solid transparent;
+  border-radius: 999px;
+  background-clip: padding-box;
+}
+::-webkit-scrollbar-thumb:hover {
+  background-color: color-mix(in srgb, var(--overlay) 34%, transparent);
+  background-clip: padding-box;
+}
+::-webkit-scrollbar-thumb:active {
+  background-color: color-mix(in srgb, var(--overlay) 46%, transparent);
+  background-clip: padding-box;
+}
+::-webkit-scrollbar-corner {
+  background: transparent;
+}
+
 /* The `scrollbar-color` declarations dotted around this file can only set
    colours. WebKit pseudo-elements do the rest, so every scrolling surface in
    the app gets the same shape. Width stays at 12px because xterm measures the
@@ -2861,13 +2913,22 @@ select {
    the rules above reach the terminal — its slider arrived square and full
    width. Only the shape is set here: the slider's width, height and offset are
    inline styles from xterm's layout pass, and its colour comes from the theme's
-   scrollbarSlider* entries, both of which should keep winning. The 2px border
-   slims the visible slider to 6px, matching the native thumbs above, while the
-   full 10px stays clickable. `border-box` keeps that border inside the width
-   xterm assigned instead of widening the slider over the text. */
+   scrollbarSlider* entries, both of which should keep winning. `border-box`
+   keeps the border inside the width xterm assigned instead of widening the
+   slider over the text.
+
+   Geometry: the slider box is 14px (xterm's verticalScrollbarSize, part of its
+   column math — don't change it) flush against the terminal's right edge, and
+   beyond that edge sits the frame's 12px padding. A symmetric border centred
+   the visible slider in the 14px box, which read as glued-to-the-text with a
+   wide dead gutter to its right. The lopsided border instead shows a slim 6px
+   pill at the box's right edge — roughly centred in the whole text-to-frame
+   gap — while the full 14px stays clickable. */
 .terminal-surface .xterm .xterm-scrollable-element > .scrollbar > .slider {
   box-sizing: border-box;
   border: 2px solid transparent;
+  border-left-width: 8px;
+  border-right-width: 0;
   border-radius: 999px;
   /* Beats the `background` shorthand in xterm's injected rule, which would
      otherwise reset the clip and paint the slider under its own border. */

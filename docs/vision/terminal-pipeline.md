@@ -116,6 +116,14 @@ xterm 6 upgrade provides real synchronized-output support.
   viewport/follow defenses until it ships, then re-test whether they can be
   simplified. The rejected Phase 2 clear-sequence filter remains removed.
 
+Update (2026-08-28): the viewport fixes landed in the 6.1.0 beta line, which
+Shep now pins (`@xterm/xterm@6.1.0-beta.303`, `@xterm/addon-webgl@0.20.0-beta.299`;
+other addons unchanged). This covers #5770 (DEC 2026 viewport sync), #6081
+(viewport pinned to the top after ESC[3J with `isUserScrolling` latched — the
+"jumps to the very top" report), and #5993 (selection drag-scroll clamping).
+The pinned-bottom/IME defenses stay: they also guard paths upstream does not
+own. Re-evaluate the pin when 7.0 stable ships.
+
 Implementation status (2026-08-06): upgraded the stable package family together
 to xterm 6.0.0, Fit 0.11.0, Unicode11 0.9.0, Web Links 0.12.0, and WebGL 0.19.0.
 The removed Canvas addon is no longer imported or installed. Shep prefers WebGL

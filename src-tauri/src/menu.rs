@@ -1,6 +1,25 @@
-use tauri::menu::{AboutMetadataBuilder, MenuBuilder, MenuItem, SubmenuBuilder, HELP_SUBMENU_ID};
-use tauri::{AppHandle, Emitter, Wry};
+//! The native menu is macOS-only.
+//!
+//! On macOS `set_menu` installs the menu in the system menu bar. Everywhere
+//! else Tauri attaches it to the window itself, and a Win32 menu bar drawn in
+//! the non-client area of a `transparent: true` window gets no background —
+//! it renders as a see-through strip of "File / Edit / View" above the app.
+//! Its predefined Edit items would also claim Ctrl+C, which a terminal needs
+//! for SIGINT. The accelerators it carried are bound in the frontend instead
+//! (see CTRL_SHORTCUTS in AppShell.tsx).
 
+#[cfg(target_os = "macos")]
+use tauri::menu::{AboutMetadataBuilder, MenuBuilder, MenuItem, SubmenuBuilder, HELP_SUBMENU_ID};
+#[cfg(target_os = "macos")]
+use tauri::Emitter;
+use tauri::{AppHandle, Wry};
+
+#[cfg(not(target_os = "macos"))]
+pub fn setup(_app: &AppHandle<Wry>) -> tauri::Result<()> {
+    Ok(())
+}
+
+#[cfg(target_os = "macos")]
 pub fn setup(app: &AppHandle<Wry>) -> tauri::Result<()> {
     let version = app.config().version.clone();
 

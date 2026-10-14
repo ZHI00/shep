@@ -29,6 +29,8 @@ const en = {
 
   // ── Sessions ─────────────────────────────────────────────
   "session.fallbackName": "Session",
+  "session.flag": "Flag for review",
+  "session.unflag": "Clear review flag",
   "session.close": "Close Session",
   "session.resume": "Resume Session",
   "session.forget": "Remove from list",
@@ -137,6 +139,8 @@ const zh: Record<TranslationKey, string> = {
 
   // ── 会话 ─────────────────────────────────────────────────
   "session.fallbackName": "会话",
+  "session.flag": "待看",
+  "session.unflag": "取消待看",
   "session.close": "关闭会话",
   "session.resume": "恢复会话",
   "session.forget": "从列表移除",

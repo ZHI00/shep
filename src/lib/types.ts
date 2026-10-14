@@ -140,6 +140,17 @@ export interface TerminalTabData extends TabBase {
    * it is explicitly closed from there.
    */
   detached?: boolean;
+  /**
+   * Reopened from the dormant list rather than launched with a fresh task,
+   * so the sidebar keeps it out of the newest-launch-first ordering.
+   */
+  resumed?: boolean;
+  /**
+   * Marked "to watch" from the sidebar so a busy session list can't bury it.
+   * Cleared only by hand — the mark is a promise to come back, not activity
+   * state, so selecting the session must not unset it.
+   */
+  flagged?: boolean;
 }
 
 export interface SessionHistoryUpsert {

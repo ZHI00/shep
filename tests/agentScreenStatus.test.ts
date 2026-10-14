@@ -31,6 +31,53 @@ test("Claude working title is working", () => {
   assert.equal(result.ruleId, "claude-working-title");
 });
 
+test("Claude 2.x half-circle title is working", () => {
+  const result = detectAgentScreenStatus("claude", "❯ ", "◐ Terminal haiku");
+  assert.equal(result.state, "working");
+  assert.equal(result.ruleId, "claude-working-title");
+});
+
+test("Claude 2.x idle title is not mistaken for working", () => {
+  const result = detectAgentScreenStatus("claude", "❯ ", "✳ Claude Code");
+  assert.equal(result.state, "idle");
+  assert.equal(result.ruleId, "claude-live-prompt");
+});
+
+test("Claude status row outranks the prompt it keeps on screen", () => {
+  const result = detectAgentScreenStatus(
+    "claude",
+    "✻ Ideating… (4s · ↓ 148 tokens · esc to interrupt)\n───\n❯ \n───\n  Opus 5 · 36%",
+  );
+  assert.equal(result.state, "working");
+  assert.equal(result.ruleId, "claude-working-row");
+});
+
+test("Claude status row without a hint still reads as working", () => {
+  const result = detectAgentScreenStatus("claude", "✻ Churning…\n───\n❯ ");
+  assert.equal(result.state, "working");
+  assert.equal(result.ruleId, "claude-working-row");
+});
+
+test("Claude status row is recognised on every spinner frame", () => {
+  for (const frame of ["·", "✢", "✳", "✶", "✻", "✽"]) {
+    const result = detectAgentScreenStatus(
+      "claude",
+      `${frame} Meandering… (4s · ↓ 170 tokens · thinking)\n───\n❯ `,
+    );
+    assert.equal(result.state, "working", `missed frame ${frame}`);
+  }
+});
+
+test("Claude finished status row is idle", () => {
+  const result = detectAgentScreenStatus(
+    "claude",
+    "⏺ Done.\n✻ Churned for 5s · done 10:03 AM\n───\n❯ ",
+    "✳ Terminal haiku",
+  );
+  assert.equal(result.state, "idle");
+  assert.equal(result.ruleId, "claude-live-prompt");
+});
+
 test("Claude live prompt is idle", () => {
   const result = detectAgentScreenStatus("claude", "Done.\n\n❯ ");
   assert.equal(result.state, "idle");
@@ -64,6 +111,25 @@ test("Codex working row is working", () => {
   const result = detectAgentScreenStatus(
     "codex",
     "• Working (12s · esc to interrupt)",
+  );
+  assert.equal(result.state, "working");
+  assert.equal(result.ruleId, "codex-working-row");
+});
+
+test("Codex working row without spinner bullet is working", () => {
+  // With codex's tui.animations disabled the status row loses its •/◦ prefix.
+  const result = detectAgentScreenStatus(
+    "codex",
+    "Working (12s • esc to interrupt)",
+  );
+  assert.equal(result.state, "working");
+  assert.equal(result.ruleId, "codex-working-row");
+});
+
+test("Codex thinking header is working", () => {
+  const result = detectAgentScreenStatus(
+    "codex",
+    "⠙ Thinking (3s • esc to interrupt)",
   );
   assert.equal(result.state, "working");
   assert.equal(result.ruleId, "codex-working-row");
