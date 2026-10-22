@@ -109,10 +109,16 @@ export function buildPowerShellCommandLine(command: string, args: string[]): str
   return [head === command ? head : `& ${head}`, ...args.map(quote)].join(" ");
 }
 
-/** Extra args the user wants on every launch of this assistant. */
+/** Shared launch args for new and resumed assistant sessions. */
 export function extraLaunchArgs(
   assistantId: string,
   overrides: Record<string, AssistantLaunchOverride> | undefined,
 ): string[] {
-  return overrides?.[assistantId]?.args ?? [];
+  const args = overrides?.[assistantId]?.args ?? [];
+  // Codex's alternate screen has no xterm scrollback. Keep its transcript in
+  // the normal buffer so users can scroll and drag the terminal scrollbar.
+  if (assistantId === "codex" && !args.includes("--no-alt-screen")) {
+    return ["--no-alt-screen", ...args];
+  }
+  return args;
 }

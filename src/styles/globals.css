@@ -2924,7 +2924,7 @@ select {
    wide dead gutter to its right. The lopsided border instead shows a slim 6px
    pill at the box's right edge — roughly centred in the whole text-to-frame
    gap — while the full 14px stays clickable. */
-.terminal-surface .xterm .xterm-scrollable-element > .scrollbar > .slider {
+.terminal-surface .xterm .xterm-scrollable-element > .xterm-scrollbar > .xterm-slider {
   box-sizing: border-box;
   border: 2px solid transparent;
   border-left-width: 8px;
@@ -2937,7 +2937,7 @@ select {
 }
 
 /* The track is only a hit area — the slider is the whole visual. */
-.terminal-surface .xterm .xterm-scrollable-element > .scrollbar {
+.terminal-surface .xterm .xterm-scrollable-element > .xterm-scrollbar {
   background: transparent;
 }
 
