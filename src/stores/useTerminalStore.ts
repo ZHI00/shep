@@ -13,6 +13,8 @@ interface TerminalStore {
   projectState: Record<string, ProjectTerminalState>;
   activeProjectPath: string | null;
   tabActivity: Record<number, TabActivity>;
+  windowFocused: boolean;
+  setWindowFocused: (focused: boolean) => void;
   switchProject: (repoPath: string) => void;
   removeProject: (repoPath: string) => void;
   addTab: (tab: UnifiedTab) => void;
@@ -47,6 +49,41 @@ interface TerminalStore {
   clearTabBell: (ptyId: number) => void;
   removeActivity: (ptyId: number) => void;
   getAllProjectTabs: (repoPath: string) => UnifiedTab[];
+}
+
+/** Only a session actually visible in the focused window is read. */
+function isSessionViewed(state: TerminalStore, ptyId: number): boolean {
+  if (!state.windowFocused || !state.activeProjectPath) return false;
+  const project = state.projectState[state.activeProjectPath];
+  return project?.tabs.some((tab) =>
+    (tab.kind === "terminal" || tab.kind === "assistant") &&
+    tab.ptyId === ptyId && tab.id === project.activeTabId && !tab.detached,
+  ) ?? false;
+}
+
+function acknowledgeTab(state: TerminalStore, tab: UnifiedTab | undefined): Record<number, TabActivity> {
+  if (!state.windowFocused || !tab || (tab.kind !== "terminal" && tab.kind !== "assistant") || tab.detached) {
+    return state.tabActivity;
+  }
+  const activity = state.tabActivity[tab.ptyId];
+  if (!activity || (!activity.agentDone && !activity.bell)) return state.tabActivity;
+  return {
+    ...state.tabActivity,
+    [tab.ptyId]: { ...activity, agentDone: false, bell: false },
+  };
+}
+
+/** Count sessions, not events: a completion and a bell on one tab count once. */
+export function getUnreadSessionCount(state: Pick<TerminalStore, "projectState" | "tabActivity">): number {
+  const unread = new Set<number>();
+  for (const project of Object.values(state.projectState)) {
+    for (const tab of project.tabs) {
+      if (tab.kind !== "terminal" && tab.kind !== "assistant") continue;
+      const activity = state.tabActivity[tab.ptyId];
+      if (activity?.agentDone || activity?.bell) unread.add(tab.ptyId);
+    }
+  }
+  return unread.size;
 }
 
 function emptyState(): ProjectTerminalState {
@@ -151,29 +188,27 @@ export const useTerminalStore = create<TerminalStore>((set, get) => ({
   projectState: {},
   activeProjectPath: null,
   tabActivity: {},
+  windowFocused: true,
+
+  setWindowFocused: (windowFocused: boolean) => {
+    set((state) => {
+      const project = state.activeProjectPath ? state.projectState[state.activeProjectPath] : undefined;
+      const tab = project?.tabs.find((candidate) => candidate.id === project.activeTabId);
+      const tabActivity = acknowledgeTab({ ...state, windowFocused }, tab);
+      if (windowFocused === state.windowFocused && tabActivity === state.tabActivity) return state;
+      return { windowFocused, tabActivity };
+    });
+  },
 
   switchProject: (repoPath: string) => {
     set((state) => {
       if (state.projectState[repoPath]) {
         const project = state.projectState[repoPath];
         const activeTab = project.tabs.find((tab) => tab.id === project.activeTabId);
-        if (
-          activeTab &&
-          (activeTab.kind === "terminal" || activeTab.kind === "assistant") &&
-          state.tabActivity[activeTab.ptyId]?.agentDone
-        ) {
-          return {
-            activeProjectPath: repoPath,
-            tabActivity: {
-              ...state.tabActivity,
-              [activeTab.ptyId]: {
-                ...state.tabActivity[activeTab.ptyId],
-                agentDone: false,
-              },
-            },
-          };
-        }
-        return { activeProjectPath: repoPath };
+        return {
+          activeProjectPath: repoPath,
+          tabActivity: acknowledgeTab(state, activeTab),
+        };
       }
       return {
         projectState: { ...state.projectState, [repoPath]: emptyState() },
@@ -253,6 +288,7 @@ export const useTerminalStore = create<TerminalStore>((set, get) => ({
           ...state.projectState,
           [path]: { tabs, activeTabId },
         },
+        tabActivity: acknowledgeTab(state, tabs.find((tab) => tab.id === activeTabId)),
       };
     });
   },
@@ -313,6 +349,7 @@ export const useTerminalStore = create<TerminalStore>((set, get) => ({
           ...state.projectState,
           [path]: { tabs, activeTabId },
         },
+        tabActivity: acknowledgeTab(state, tabs.find((tab) => tab.id === activeTabId)),
       };
     });
   },
@@ -347,25 +384,12 @@ export const useTerminalStore = create<TerminalStore>((set, get) => ({
       const ps = state.projectState[path];
       if (!ps || !ps.tabs.some((t) => t.id === id)) return state;
       const tab = ps.tabs.find((candidate) => candidate.id === id);
-      const clearDone = tab &&
-        (tab.kind === "terminal" || tab.kind === "assistant") &&
-        state.tabActivity[tab.ptyId]?.agentDone;
       return {
         projectState: {
           ...state.projectState,
           [path]: { ...ps, activeTabId: id },
         },
-        ...(clearDone
-          ? {
-              tabActivity: {
-                ...state.tabActivity,
-                [tab.ptyId]: {
-                  ...state.tabActivity[tab.ptyId],
-                  agentDone: false,
-                },
-              },
-            }
-          : {}),
+        tabActivity: acknowledgeTab(state, path === state.activeProjectPath ? tab : undefined),
       };
     });
   },
@@ -645,23 +669,11 @@ export const useTerminalStore = create<TerminalStore>((set, get) => ({
       const statusSource = observation?.source ?? null;
       const statusReason = observation?.reason ?? null;
       const statusRuleId = observation?.ruleId ?? null;
-      let isViewed = false;
-      for (const [path, project] of Object.entries(state.projectState)) {
-        const tab = project.tabs.find(
-          (candidate) =>
-            (candidate.kind === "terminal" || candidate.kind === "assistant") &&
-            candidate.ptyId === ptyId,
-        );
-        if (tab) {
-          isViewed = path === state.activeProjectPath && tab.id === project.activeTabId;
-          break;
-        }
-      }
       const agentDone = nextAgentDoneState(
         prev.agentState,
         prev.agentDone,
         agentState,
-        isViewed,
+        isSessionViewed(state, ptyId),
       );
       if (
         prev.agentState === agentState &&
@@ -722,7 +734,7 @@ export const useTerminalStore = create<TerminalStore>((set, get) => ({
           ...state.tabActivity,
           [ptyId]: {
             ...prev,
-            bell: true,
+            bell: !isSessionViewed(state, ptyId),
             lastAttentionAt: Date.now(),
             lastNotificationMessage: message?.trim() || prev.lastNotificationMessage,
           },

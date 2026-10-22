@@ -1,12 +1,11 @@
-import { listen } from "@tauri-apps/api/event";
+import { getCurrentWindow } from "@tauri-apps/api/window";
 import {
   isPermissionGranted,
   requestPermission,
   sendNotification as sendNativeNotification,
 } from "@tauri-apps/plugin-notification";
-import { useTerminalStore } from "../stores/useTerminalStore";
+import { getUnreadSessionCount, useTerminalStore } from "../stores/useTerminalStore";
 
-let focused = true;
 let permissionGranted = false;
 let initialized = false;
 
@@ -14,14 +13,44 @@ export async function initNotifications() {
   if (initialized) return;
   initialized = true;
 
-  listen("tauri://focus", () => {
-    focused = true;
-  });
-  listen("tauri://blur", () => {
-    focused = false;
-  });
+  const appWindow = getCurrentWindow();
+  if (navigator.userAgent.includes("Mac")) {
+    let previousCount = -1;
+    let pendingBadge = Promise.resolve();
+    const syncBadge = () => {
+      const count = getUnreadSessionCount(useTerminalStore.getState());
+      if (count === previousCount) return;
+      previousCount = count;
+      // Serialize native writes so an older count cannot overwrite a newer one.
+      pendingBadge = pendingBadge
+        .then(() => appWindow.setBadgeCount(count || undefined))
+        .catch((error) => {
+          previousCount = -1;
+          if (import.meta.env.DEV) console.error("[shep] dock badge error:", error);
+        });
+    };
+    useTerminalStore.subscribe(syncBadge);
+    syncBadge();
+  }
 
-  permissionGranted = await isPermissionGranted();
+  try {
+    let focusChanged = false;
+    await appWindow.onFocusChanged(({ payload }) => {
+      focusChanged = true;
+      useTerminalStore.getState().setWindowFocused(payload);
+    });
+    const focused = await appWindow.isFocused();
+    // A focus event during the query is newer than the query's snapshot.
+    if (!focusChanged) useTerminalStore.getState().setWindowFocused(focused);
+  } catch (error) {
+    if (import.meta.env.DEV) console.error("[shep] window focus error:", error);
+  }
+
+  try {
+    permissionGranted = await isPermissionGranted();
+  } catch (error) {
+    if (import.meta.env.DEV) console.error("[shep] notification permission error:", error);
+  }
 }
 
 async function ensureNotificationPermission() {
@@ -35,7 +64,7 @@ async function ensureNotificationPermission() {
 export async function notifyAgent(ptyId: number, message: string) {
   useTerminalStore.getState().setTabBell(ptyId, message);
 
-  if (focused) {
+  if (useTerminalStore.getState().windowFocused) {
     return;
   }
 
